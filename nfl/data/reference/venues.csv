@@ -1,0 +1,54 @@
+venue_id,name,city,state,country,latitude,longitude,elevation_m,timezone,roof_type,surface,capacity,first_season,last_season,home_teams,aliases
+ATL00,Georgia Dome,Atlanta,GA,USA,33.7576,-84.4008,320,America/New_York,dome,fieldturf,71228,2010,2016,ATL,Georgia Dome
+ATL97,Mercedes-Benz Stadium,Atlanta,GA,USA,33.7554,-84.4008,312,America/New_York,retractable,fieldturf,71000,2017,,ATL,Mercedes-Benz Stadium|Mercedes Benz Stadium
+BAL00,M&T Bank Stadium,Baltimore,MD,USA,39.2780,-76.6227,7,America/New_York,open,grass,70745,2010,,BAL,M&T Bank Stadium|M and T Bank Stadium
+BOS00,Gillette Stadium,Foxborough,MA,USA,42.0909,-71.2643,76,America/New_York,open,fieldturf,64628,2010,,NE,Gillette Stadium
+BUF00,Highmark Stadium,Orchard Park,NY,USA,42.7738,-78.7870,235,America/New_York,open,a_turf,71608,2010,,BUF,Highmark Stadium|New Era Field|Ralph Wilson Stadium
+BUF01,Rogers Centre,Toronto,ON,Canada,43.6414,-79.3894,82,America/Toronto,retractable,a_turf,53506,2010,2013,BUF,Rogers Centre|Rogers Center|SkyDome
+CAR00,Bank of America Stadium,Charlotte,NC,USA,35.2258,-80.8528,218,America/New_York,open,grass,74867,2010,,CAR,Bank of America Stadium
+CHI98,Soldier Field,Chicago,IL,USA,41.8623,-87.6167,180,America/Chicago,open,grass,61500,2010,,CHI,Soldier Field
+CIN00,Paycor Stadium,Cincinnati,OH,USA,39.0955,-84.5160,150,America/New_York,open,fieldturf,65515,2010,,CIN,Paycor Stadium|Paul Brown Stadium
+CLE00,Huntington Bank Field,Cleveland,OH,USA,41.5061,-81.6996,177,America/New_York,open,grass,67431,2010,,CLE,Huntington Bank Field|FirstEnergy Stadium|Cleveland Browns Stadium
+DAL00,AT&T Stadium,Arlington,TX,USA,32.7473,-97.0945,184,America/Chicago,retractable,matrixturf,80000,2010,,DAL,AT&T Stadium|ATT Stadium|Cowboys Stadium
+DEN00,Empower Field at Mile High,Denver,CO,USA,39.7439,-105.0201,1610,America/Denver,open,grass,76125,2010,,DEN,Empower Field at Mile High|Sports Authority Field at Mile High|Invesco Field at Mile High|Mile High Stadium
+DET00,Ford Field,Detroit,MI,USA,42.3400,-83.0456,184,America/Detroit,dome,fieldturf,65000,2010,,DET,Ford Field
+FRA00,Deutsche Bank Park,Frankfurt,HE,Germany,50.0685,8.6455,100,Europe/Berlin,retractable,grass,58000,2023,2023,,Deutsche Bank Park|Waldstadion|Frankfurt Stadium
+GER00,Allianz Arena,Munich,BY,Germany,48.2188,11.6247,495,Europe/Berlin,open,grass,75024,2022,,,Allianz Arena|FC Bayern Munich Stadium|Munich Football Arena
+GNB00,Lambeau Field,Green Bay,WI,USA,44.5013,-88.0622,195,America/Chicago,open,grass,81441,2010,,GB,Lambeau Field
+HOU00,NRG Stadium,Houston,TX,USA,29.6847,-95.4107,15,America/Chicago,retractable,astroturf,72220,2010,,HOU,NRG Stadium|Reliant Stadium
+IND00,Lucas Oil Stadium,Indianapolis,IN,USA,39.7601,-86.1639,215,America/Indiana/Indianapolis,retractable,fieldturf,67000,2010,,IND,Lucas Oil Stadium
+JAX00,EverBank Stadium,Jacksonville,FL,USA,30.3239,-81.6373,3,America/New_York,open,grass,67814,2010,,JAX,EverBank Stadium|EverBank Field|TIAA Bank Field|TIAA Bank Stadium|Jacksonville Municipal Stadium
+KAN00,GEHA Field at Arrowhead Stadium,Kansas City,MO,USA,39.0489,-94.4839,260,America/Chicago,open,grass,76416,2010,,KC,GEHA Field at Arrowhead Stadium|Arrowhead Stadium
+LAX01,SoFi Stadium,Inglewood,CA,USA,33.9535,-118.3392,30,America/Los_Angeles,dome,matrixturf,70240,2020,,LA|LAC,SoFi Stadium
+LAX97,Dignity Health Sports Park,Carson,CA,USA,33.8644,-118.2611,43,America/Los_Angeles,open,grass,27000,2017,2019,LAC,Dignity Health Sports Park|StubHub Center
+LAX99,Los Angeles Memorial Coliseum,Los Angeles,CA,USA,34.0141,-118.2879,49,America/Los_Angeles,open,grass,77500,2016,2019,LA,Los Angeles Memorial Coliseum|LA Memorial Coliseum
+LON00,Wembley Stadium,London,,United Kingdom,51.5560,-0.2796,45,Europe/London,open,grass,90000,2010,,,Wembley Stadium
+LON01,Twickenham Stadium,London,,United Kingdom,51.4560,-0.3416,13,Europe/London,open,grass,82000,2016,2017,,Twickenham Stadium
+LON02,Tottenham Hotspur Stadium,London,,United Kingdom,51.6043,-0.0665,32,Europe/London,open,grass,62850,2019,,,Tottenham Hotspur Stadium|Tottenham Stadium
+MEX00,Estadio Azteca,Mexico City,CMX,Mexico,19.3029,-99.1505,2241,America/Mexico_City,open,grass,83264,2016,,,Estadio Azteca|Azteca Stadium|Estadio Banorte
+MIA00,Hard Rock Stadium,Miami Gardens,FL,USA,25.9580,-80.2389,3,America/New_York,open,grass,64767,2010,,MIA,Hard Rock Stadium|Sun Life Stadium|Land Shark Stadium|Dolphin Stadium
+MIN00,Mall of America Field,Minneapolis,MN,USA,44.9737,-93.2581,248,America/Chicago,dome,sportturf,64121,2010,2013,MIN,Mall of America Field|Hubert H. Humphrey Metrodome|Metrodome
+MIN01,U.S. Bank Stadium,Minneapolis,MN,USA,44.9736,-93.2575,254,America/Chicago,dome,sportturf,66655,2016,,MIN,U.S. Bank Stadium|US Bank Stadium
+MIN98,TCF Bank Stadium,Minneapolis,MN,USA,44.9764,-93.2247,253,America/Chicago,open,fieldturf,50805,2010,2015,MIN,TCF Bank Stadium
+NAS00,Nissan Stadium,Nashville,TN,USA,36.1665,-86.7713,137,America/Chicago,open,grass,69143,2010,,TEN,Nissan Stadium|LP Field
+NOR00,Caesars Superdome,New Orleans,LA,USA,29.9511,-90.0812,1,America/Chicago,dome,sportturf,73208,2010,,NO,Caesars Superdome|Mercedes-Benz Superdome|Louisiana Superdome|Superdome
+NYC01,MetLife Stadium,East Rutherford,NJ,USA,40.8135,-74.0745,2,America/New_York,open,fieldturf,82500,2010,,NYG|NYJ,MetLife Stadium|New Meadowlands Stadium
+OAK00,Oakland Coliseum,Oakland,CA,USA,37.7516,-122.2005,2,America/Los_Angeles,open,grass,56063,2010,2019,OAK,Oakland Coliseum|O.co Coliseum|Oakland-Alameda County Coliseum|RingCentral Coliseum|Ring Central Coliseum|Overstock.com Coliseum
+PAR00,Stade de France,Saint-Denis,IDF,France,48.9245,2.3601,30,Europe/Paris,open,grass,81338,2026,,,Stade de France
+PHI00,Lincoln Financial Field,Philadelphia,PA,USA,39.9008,-75.1675,12,America/New_York,open,grass,67594,2010,,PHI,Lincoln Financial Field
+PHO00,State Farm Stadium,Glendale,AZ,USA,33.5276,-112.2626,320,America/Phoenix,retractable,grass,63400,2010,,ARI,State Farm Stadium|University of Phoenix Stadium
+PIT00,Acrisure Stadium,Pittsburgh,PA,USA,40.4468,-80.0158,218,America/New_York,open,grass,68400,2010,,PIT,Acrisure Stadium|Heinz Field
+SAO00,Neo Quimica Arena,Sao Paulo,SP,Brazil,-23.5453,-46.4742,777,America/Sao_Paulo,open,grass,48905,2024,,,Neo Quimica Arena|Arena Corinthians|Corinthians Arena
+SDG00,Qualcomm Stadium,San Diego,CA,USA,32.7831,-117.1194,16,America/Los_Angeles,open,grass,70561,2010,2016,SD,Qualcomm Stadium|SDCCU Stadium|San Diego Stadium|Jack Murphy Stadium
+SEA00,Lumen Field,Seattle,WA,USA,47.5952,-122.3316,3,America/Los_Angeles,open,fieldturf,68740,2010,,SEA,Lumen Field|CenturyLink Field|Qwest Field
+SFO00,Candlestick Park,San Francisco,CA,USA,37.7136,-122.3861,4,America/Los_Angeles,open,grass,69732,2010,2013,SF,Candlestick Park|Monster Park
+SFO01,Levi's Stadium,Santa Clara,CA,USA,37.4033,-121.9694,5,America/Los_Angeles,open,grass,68500,2014,,SF,Levi's Stadium|Levis Stadium
+STL00,Edward Jones Dome,St. Louis,MO,USA,38.6329,-90.1885,142,America/Chicago,dome,astroplay,67277,2010,2015,STL,Edward Jones Dome|The Dome at America's Center
+TAM00,Raymond James Stadium,Tampa,FL,USA,27.9759,-82.5033,11,America/New_York,open,grass,69218,2010,,TB,Raymond James Stadium
+VEG00,Allegiant Stadium,Las Vegas,NV,USA,36.0909,-115.1833,620,America/Los_Angeles,dome,grass,65000,2020,,LV,Allegiant Stadium
+WAS00,Northwest Stadium,Landover,MD,USA,38.9076,-76.8645,58,America/New_York,open,grass,64000,2010,,WAS,Northwest Stadium|FedExField|FedEx Field
+BER00,Olympiastadion Berlin,Berlin,BE,Germany,52.5147,13.2395,65,Europe/Berlin,open,grass,74475,2025,2025,,Olympiastadion Berlin|Olympiastadion|Berlin Olympic Stadium
+DUB00,Croke Park,Dublin,,Ireland,53.3607,-6.2512,42,Europe/Dublin,open,grass,82300,2025,2025,,Croke Park
+MAD00,Estadio Santiago Bernabeu,Madrid,MD,Spain,40.4531,-3.6883,645,Europe/Madrid,retractable,grass,83186,2025,,,Estadio Santiago Bernabeu|Santiago Bernabeu|Bernabeu
+MEL00,Melbourne Cricket Ground,Melbourne,VIC,Australia,-37.8199,144.9834,17,Australia/Melbourne,open,grass,100024,2026,,,Melbourne Cricket Ground|MCG
+RIO00,Estadio do Maracana,Rio de Janeiro,RJ,Brazil,-22.9121,-43.2302,10,America/Sao_Paulo,open,grass,73139,2026,,,Estadio do Maracana|Maracana Stadium|Maracana

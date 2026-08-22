@@ -6,6 +6,8 @@
 *.duckdb
 *.duckdb.wal
 *.csv
+# ...except the hand-maintained static reference tables, which are committed.
+!nfl/data/reference/*.csv
 *.feather
 *.h5
 *.keras

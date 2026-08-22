@@ -22,6 +22,9 @@ app = typer.Typer(
 )
 console = Console()
 
+ingest_app = typer.Typer(help="Ingest data sources")
+app.add_typer(ingest_app, name="ingest")
+
 _NOT_IMPLEMENTED = "[yellow]not implemented yet[/yellow] (scaffold stage)"
 
 
@@ -39,10 +42,6 @@ def main(
     ] = False,
 ) -> None:
     """NFL win-probability toolkit."""
-
-
-ingest_app = typer.Typer(help="Ingest data sources")
-app.add_typer(ingest_app, name="ingest")
 
 
 @ingest_app.command("nflverse")
@@ -101,6 +100,41 @@ def ingest_nflverse_cmd(
         con.close()
     written = sum(r.rows for r in results if r.written)
     console.print(f"{root}: {written:,} rows written, {len(views)} views registered")
+
+
+@ingest_app.command("weather")
+def ingest_weather_cmd(
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Season range, e.g. '2010-2024' or '2024'.")
+    ] = "2010-2024",
+    games_parquet: Annotated[
+        str | None,
+        typer.Option("--games-parquet", help="Games/schedules parquet (glob allowed)."),
+    ] = None,
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="auto (ERA5 for past games, forecast for upcoming) | archive | forecast.",
+        ),
+    ] = "auto",
+    force: Annotated[
+        bool, typer.Option("--force/--no-force", help="Refetch seasons already on disk.")
+    ] = False,
+) -> None:
+    """Fetch Open-Meteo weather for each game and write ``data/raw/weather/season=YYYY/``."""
+    from nfl.data import weather as weather_mod
+
+    paths = weather_mod.ingest_weather(
+        seasons,
+        games_parquet=games_parquet or weather_mod.DEFAULT_GAMES_PARQUET,
+        mode=mode,
+        force=force,
+    )
+    for path in paths:
+        console.print(f"wrote [green]{path}[/green]")
+    if not paths:
+        console.print("[yellow]no seasons matched[/yellow]")
 
 
 @app.command()
