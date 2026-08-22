@@ -137,6 +137,136 @@ def ingest_weather_cmd(
         console.print("[yellow]no seasons matched[/yellow]")
 
 
+market_app = typer.Typer(help="Kalshi / closing-line market data. Evaluation only (ADR 0001).")
+app.add_typer(market_app, name="market")
+
+
+def _parse_seasons(seasons: str) -> list[int]:
+    """``'2010-2012'`` or ``'2024'`` or ``'2022,2024'`` -> list of ints."""
+    out: list[int] = []
+    for chunk in seasons.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            start, end = chunk.split("-", 1)
+            out.extend(range(int(start), int(end) + 1))
+        else:
+            out.append(int(chunk))
+    return out
+
+
+@ingest_app.command("closing-lines")
+def ingest_closing_lines_cmd(
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Season range, e.g. '2010-2024' or '2024'.")
+    ] = "2010-2024",
+    force: Annotated[bool, typer.Option("--force", help="Overwrite existing parquet.")] = False,
+) -> None:
+    """Read closing lines out of the nflverse schedule into ``Market`` rows."""
+    from nfl.data.market import closing_lines
+
+    try:
+        paths = closing_lines.ingest_closing_lines(_parse_seasons(seasons), force=force)
+    except closing_lines.ClosingLinesNotFound as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    for path in paths:
+        console.print(f"wrote {path}")
+
+
+@ingest_app.command("kalshi")
+def ingest_kalshi_cmd(
+    game_ids: Annotated[list[str], typer.Argument(help="Game ids, e.g. '2024_18_KC_DEN'.")],
+    liquid_only: Annotated[
+        bool, typer.Option("--liquid-only", help="Drop rows failing the liquidity filter.")
+    ] = False,
+) -> None:
+    """Snapshot Kalshi NFL game markets. **Evaluation only — never a feature.**"""
+    from nfl.data.market import closing_lines, kalshi
+
+    schedule = _load_schedule(closing_lines)
+    path = kalshi.ingest_kalshi(game_ids, schedule=schedule, require_liquidity=liquid_only)
+    console.print(f"wrote {path}")
+
+
+@ingest_app.command("sentiment")
+def ingest_sentiment_cmd(
+    game_ids: Annotated[list[str], typer.Argument(help="Game ids, e.g. '2024_18_KC_DEN'.")],
+    hours: Annotated[
+        int, typer.Option("--hours", help="Look-back window ending now, in hours.")
+    ] = 168,
+) -> None:
+    """Score ESPN injuries + news into rule-based ``Sentiment`` rows."""
+    from datetime import UTC, datetime, timedelta
+
+    from nfl.data.sentiment import sources
+
+    window_end = datetime.now(UTC)
+    path = sources.ingest_sentiment(
+        game_ids,
+        window_start=window_end - timedelta(hours=hours),
+        window_end=window_end,
+    )
+    console.print(f"wrote {path}")
+
+
+def _load_schedule(closing_lines_module):  # type: ignore[no-untyped-def]
+    try:
+        return closing_lines_module.load_schedule()
+    except closing_lines_module.ClosingLinesNotFound as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+@market_app.command("snapshot")
+def market_snapshot(
+    game_id: Annotated[str, typer.Argument(help="Game id, e.g. '2024_18_KC_DEN'.")],
+    liquid_only: Annotated[
+        bool, typer.Option("--liquid-only", help="Drop the row if the book is too wide/thin.")
+    ] = False,
+) -> None:
+    """Current Kalshi mid for a game. Evaluation/ledger only (ADR 0001)."""
+    from nfl.data.market import closing_lines, kalshi
+
+    schedule = _load_schedule(closing_lines)
+    row = kalshi.snapshot_game(game_id, schedule=schedule, require_liquidity=liquid_only)
+    if row is None:
+        console.print(f"[yellow]no Kalshi market found for {game_id}[/yellow]")
+        raise typer.Exit(1)
+    p_home = "?" if row.implied_prob_home is None else f"{row.implied_prob_home:.4f}"
+    console.print(f"{row.game_id} {row.kalshi_ticker} p_home={p_home}")
+    console.print(
+        f"  yes={row.kalshi_yes_price} no={row.kalshi_no_price} "
+        f"spread={row.bid_ask_spread} oi={row.kalshi_open_interest} "
+        f"collapsed={row.market_collapsed}"
+    )
+
+
+@market_app.command("history")
+def market_history(
+    game_id: Annotated[str, typer.Argument(help="Game id, e.g. '2024_18_KC_DEN'.")],
+    interval: Annotated[
+        int, typer.Option("--interval", help="Candle period in minutes: 1, 60 or 1440.")
+    ] = 60,
+    limit: Annotated[int, typer.Option("--limit", help="Max bars to print.")] = 20,
+) -> None:
+    """Kalshi candlestick price history for a game. Evaluation/ledger only."""
+    from nfl.data.market import closing_lines, kalshi
+
+    schedule = _load_schedule(closing_lines)
+    rows = kalshi.history_game(game_id, schedule=schedule, period_interval=interval)
+    if not rows:
+        console.print(f"[yellow]no Kalshi history for {game_id}[/yellow]")
+        raise typer.Exit(1)
+    for row in rows[-limit:]:
+        console.print(
+            f"{row.observed_at_utc.isoformat()} p_home={row.implied_prob_home} "
+            f"vol={row.kalshi_volume} oi={row.kalshi_open_interest}"
+        )
+    console.print(f"[dim]{len(rows)} bars ({interval}m) for {rows[0].kalshi_ticker}[/dim]")
+
+
 @app.command()
 def train(
     model: Annotated[

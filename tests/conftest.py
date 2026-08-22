@@ -8,8 +8,10 @@ split, provenance stamping, partition writing — against known rows.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import pytest
@@ -95,3 +97,40 @@ def _stub_weekly_frame() -> pl.DataFrame:
             "value": [1.0, 2.0, 3.0, 4.0],
         }
     )
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def load_fixture(name: str) -> dict[str, Any]:
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def fixtures_dir() -> Path:
+    return FIXTURES
+
+
+@pytest.fixture
+def kalshi_events() -> dict[str, Any]:
+    return load_fixture("kalshi_events.json")
+
+
+@pytest.fixture
+def kalshi_orderbook() -> dict[str, Any]:
+    return load_fixture("kalshi_orderbook.json")
+
+
+@pytest.fixture
+def kalshi_candlesticks() -> dict[str, Any]:
+    return load_fixture("kalshi_candlesticks.json")
+
+
+@pytest.fixture
+def espn_injuries() -> dict[str, Any]:
+    return load_fixture("espn_injuries.json")
+
+
+@pytest.fixture
+def espn_news() -> dict[str, Any]:
+    return load_fixture("espn_news.json")

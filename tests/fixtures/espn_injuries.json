@@ -1,0 +1,67 @@
+{
+  "timestamp": "2026-08-22T23:11:48Z",
+  "season": {"year": 2026, "type": 1, "name": "Preseason"},
+  "injuries": [
+    {
+      "id": "12",
+      "displayName": "Kansas City Chiefs",
+      "injuries": [
+        {
+          "id": "634273",
+          "status": "Questionable",
+          "date": "2026-08-21T01:25Z",
+          "type": {"name": "INJURY_STATUS_QUESTIONABLE", "description": "questionable", "abbreviation": "Q"},
+          "details": {"type": "Ankle", "returnDate": "2026-08-30", "fantasyStatus": {"description": "GTD"}},
+          "shortComment": "Rice (ankle) was limited in practice Thursday.",
+          "longComment": "A very long Rotowire paragraph that must be stripped on ingest.",
+          "athlete": {
+            "id": null,
+            "displayName": "Rashee Rice",
+            "position": {"abbreviation": "WR"},
+            "status": {"name": "Active", "type": "active"},
+            "headshot": {"href": "https://example.invalid/headshot.png"}
+          }
+        },
+        {
+          "id": "634274",
+          "status": "Out",
+          "date": "2026-08-20T18:00Z",
+          "type": {"name": "INJURY_STATUS_OUT", "description": "out", "abbreviation": "O"},
+          "details": {"type": "Knee"},
+          "shortComment": "Backup QB will not travel.",
+          "athlete": {
+            "id": null,
+            "displayName": "Carson Wentz",
+            "position": {"abbreviation": "QB"},
+            "status": {"name": "Active", "type": "active"}
+          }
+        }
+      ]
+    },
+    {
+      "id": "7",
+      "displayName": "Denver Broncos",
+      "injuries": [
+        {
+          "id": "634280",
+          "status": "Out",
+          "date": "2026-08-21T12:00Z",
+          "type": {"name": "INJURY_STATUS_OUT", "description": "out", "abbreviation": "O"},
+          "details": {"type": "Achilles"},
+          "shortComment": "Nix (achilles) will miss the opener.",
+          "athlete": {
+            "id": null,
+            "displayName": "Bo Nix",
+            "position": {"abbreviation": "QB"},
+            "status": {"name": "Active", "type": "active"}
+          }
+        }
+      ]
+    },
+    {
+      "id": "999",
+      "displayName": "Not A Team",
+      "injuries": []
+    }
+  ]
+}
