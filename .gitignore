@@ -12,6 +12,12 @@
 *.joblib
 *.pkl
 
+# ...except the tiny hand-built fixtures the offline tests read, and the
+# committed static reference tables.
+!tests/fixtures/**/*.parquet
+!tests/fixtures/**/*.csv
+!nfl/data/reference/*.csv
+
 # Environments & secrets
 .venv/
 venv/

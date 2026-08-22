@@ -49,7 +49,7 @@ uv run ruff format .           # format
 uv run mypy nfl                # type check (advisory for now)
 uv run pre-commit install      # enable git hooks once per clone
 
-uv run nfl ingest --seasons 2010-2024
+uv run nfl ingest nflverse --seasons 2010-2025 [--tables pbp,schedules] [--force]
 uv run nfl train --model baseline
 uv run nfl predict 2024_18_KC_DEN --at "Q4 05:00"
 uv run nfl evaluate --season 2024
