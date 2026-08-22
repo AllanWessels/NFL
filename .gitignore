@@ -1,0 +1,42 @@
+# Data & model artifacts (never committed).
+# Root-anchored: bare `data/` would also ignore the `nfl/data/` package.
+/data/
+/models/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.csv
+*.feather
+*.h5
+*.keras
+*.joblib
+*.pkl
+
+# Environments & secrets
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Notebooks
+.ipynb_checkpoints/

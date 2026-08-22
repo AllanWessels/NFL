@@ -1,0 +1,69 @@
+[project]
+name = "nfl"
+version = "0.1.0"
+description = "NFL in-game win-probability forecasting (no market inputs)."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Allan Wessels" }]
+dependencies = [
+    "tensorflow>=2.18",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "polars>=1.0",
+    "pyarrow>=17.0",
+    "duckdb>=1.1",
+    "xgboost>=2.1",
+    "scikit-learn>=1.5",
+    "pydantic>=2.9",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+    "nflreadpy>=0.1.5",
+    "requests>=2.32",
+]
+
+[project.optional-dependencies]
+# CUDA runtime wheels for local GPU training. Kept out of the base dependency
+# set so CI does not download ~6 GB of nvidia-* wheels on every run.
+# Local: `uv sync --extra gpu`. CI: `uv sync --dev`.
+gpu = ["tensorflow[and-cuda]>=2.18"]
+
+[project.scripts]
+nfl = "nfl.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+    "pre-commit>=3.8",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nfl"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".venv", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"nfl/data/schemas.py" = ["N815"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
