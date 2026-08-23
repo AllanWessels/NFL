@@ -246,7 +246,7 @@ def train_and_report(
         )
 
     # -- 4. tf_mlp v1 (optional) -------------------------------------------- #
-    mlp_res = None
+    extra_stamps: list[tuple[str, str, Any]] = []
     if include_mlp:
         t0 = time.perf_counter()
         mlp_model, mlp_res = train_tf_mlp(
@@ -266,6 +266,7 @@ def train_and_report(
                 model_dir(mlp_model.name, mlp_res.version, root=models_root),
                 {"feature_set": "v1", "weight_by_game": True, "selection_metric": "q4"},
             )
+        extra_stamps.append(("mlp-v1", mlp_model.name, mlp_res))
 
     report = report_table(parts)
     gate = promotion_gate(report, floor="naive")
@@ -273,6 +274,7 @@ def train_and_report(
         # The slice tables belong on the artifacts too, not only in the report.
         stamped = [("naive", naive.name, naive_res), ("seq-v1", seq_model.name, seq_res)]
         stamped += [(label, m.name, r) for label, m, r in xgb_fits]
+        stamped += extra_stamps
         for label, name, res in stamped:
             _amend_manifest(
                 model_dir(name, res.version, root=models_root),
