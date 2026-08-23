@@ -1,0 +1,12 @@
+{
+ "$ref": "http://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/401671789/competitions/401671789/situation?lang=en&region=us",
+ "lastPlay": {
+  "$ref": "http://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/401671789/competitions/401671789/plays/4016717894313?lang=en&region=us"
+ },
+ "down": 4,
+ "yardLine": 10,
+ "distance": 10,
+ "isRedZone": true,
+ "homeTimeouts": 2,
+ "awayTimeouts": 0
+}

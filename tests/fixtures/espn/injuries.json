@@ -1,0 +1,541 @@
+{
+ "timestamp": "2026-08-22T23:11:48Z",
+ "season": {
+  "year": 2026,
+  "type": 1,
+  "name": "Preseason",
+  "displayName": "2026"
+ },
+ "injuries": [
+  {
+   "id": "22",
+   "displayName": "Arizona Cardinals",
+   "abbreviation": null,
+   "injuries": [
+    {
+     "id": "634273",
+     "status": "Questionable",
+     "date": "2026-08-21T01:25Z",
+     "shortComment": "Benson (knee) has not been present for any portion of the Cardinals' previous two full-squad practices this week, Theo Mackie of The Arizona Republic reports.",
+     "type": {
+      "abbreviation": "Q",
+      "description": "questionable",
+      "name": "INJURY_STATUS_QUESTIONABLE"
+     },
+     "details": {
+      "type": "Knee",
+      "returnDate": "2026-08-22",
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Trey Benson",
+      "position": {
+       "abbreviation": "RB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634271",
+     "status": "Out",
+     "date": "2026-08-21T01:06Z",
+     "shortComment": "Reiman (ankle) will not be back for the start of the regular season, Darren Urban of the Cardinals' official site reports.",
+     "type": {
+      "abbreviation": "O",
+      "description": "out",
+      "name": "INJURY_STATUS_OUT"
+     },
+     "details": {
+      "type": "Ankle",
+      "returnDate": "2026-10-11",
+      "fantasyStatus": {
+       "description": "PUP-P",
+       "abbreviation": "PUP-P"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Tip Reiman",
+      "position": {
+       "abbreviation": "TE"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634268",
+     "status": "Out",
+     "date": "2026-08-21T00:51Z",
+     "shortComment": "Sweat (knee) is almost ready to be activated off the PUP list, Darren Urban of the Cardinals' official site reports.",
+     "type": {
+      "abbreviation": "O",
+      "description": "out",
+      "name": "INJURY_STATUS_OUT"
+     },
+     "details": {
+      "type": "Knee",
+      "returnDate": "2026-08-22",
+      "fantasyStatus": {
+       "description": "PUP-P",
+       "abbreviation": "PUP-P"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Josh Sweat",
+      "position": {
+       "abbreviation": "LB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634264",
+     "status": "Active",
+     "date": "2026-08-21T00:44Z",
+     "shortComment": "Williams (Achilles) was activated from the PUP list by the Cardinals on Thursday, Darren Urban of the Cardinals' official site reports.",
+     "type": {
+      "abbreviation": "A",
+      "description": "active",
+      "name": "INJURY_STATUS_ACTIVE"
+     },
+     "details": null,
+     "athlete": {
+      "id": null,
+      "displayName": "Garrett Williams",
+      "position": {
+       "abbreviation": "CB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634244",
+     "status": "Questionable",
+     "date": "2026-08-20T21:21Z",
+     "shortComment": "Coach Mike LaFleur said Beck (ribs) \"most likely\" won't suit up for Saturday's preseason contest against the Cowboys, Josh Weinfuss of ESPN.com reports.",
+     "type": {
+      "abbreviation": "Q",
+      "description": "questionable",
+      "name": "INJURY_STATUS_QUESTIONABLE"
+     },
+     "details": {
+      "type": "Ribs",
+      "returnDate": "2026-08-22",
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Carson Beck",
+      "position": {
+       "abbreviation": "QB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634243",
+     "status": "Active",
+     "date": "2026-08-20T21:14Z",
+     "shortComment": "Coach Mike LaFleur said Thursday that Brissett won't suit up for Saturday's preseason game against the Cowboys, Josh Weinfuss of ESPN.com reports.",
+     "type": {
+      "abbreviation": "A",
+      "description": "active",
+      "name": "INJURY_STATUS_ACTIVE"
+     },
+     "details": null,
+     "athlete": {
+      "id": null,
+      "displayName": "Jacoby Brissett",
+      "position": {
+       "abbreviation": "QB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "33",
+   "displayName": "Baltimore Ravens",
+   "abbreviation": null,
+   "injuries": [
+    {
+     "id": "-1989408",
+     "status": "Questionable",
+     "date": "2026-08-22T22:56Z",
+     "shortComment": "questionable",
+     "type": {
+      "abbreviation": "Q",
+      "description": "questionable",
+      "name": "INJURY_STATUS_QUESTIONABLE"
+     },
+     "details": {
+      "type": "Thumb",
+      "returnDate": "2026-08-28",
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      }
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Jamon Johnson",
+      "position": {
+       "abbreviation": "LB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634478",
+     "status": "Questionable",
+     "date": "2026-08-22T20:56Z",
+     "shortComment": "Head coach Jesse Minter told reporters that Randall (undisclosed) is \"working through things physically,\" which is why the rookie fifth-rounder did not play in the Ravens' 13-3 preseason win over the Vikings on Saturday, Ryan Mink of the Ravens' official site reports.",
+     "type": {
+      "abbreviation": "Q",
+      "description": "questionable",
+      "name": "INJURY_STATUS_QUESTIONABLE"
+     },
+     "details": {
+      "type": "Undisclosed",
+      "returnDate": "2026-08-28",
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Adam Randall",
+      "position": {
+       "abbreviation": "RB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634337",
+     "status": "Active",
+     "date": "2026-08-21T22:54Z",
+     "shortComment": "Bateman is facing three charges stemming from a domestic incident in June, Jamison Hensley of ESPN.com reports.",
+     "type": {
+      "abbreviation": "A",
+      "description": "active",
+      "name": "INJURY_STATUS_ACTIVE"
+     },
+     "details": null,
+     "athlete": {
+      "id": null,
+      "displayName": "Rashod Bateman",
+      "position": {
+       "abbreviation": "WR"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634289",
+     "status": "Active",
+     "date": "2026-08-21T02:48Z",
+     "shortComment": "Pocic looks like the clear starting center in Baltimore, with Danny Pinter likely out for the season with a torn patella tendon, Jason La Canfora of SI.com reports.",
+     "type": {
+      "abbreviation": "A",
+      "description": "active",
+      "name": "INJURY_STATUS_ACTIVE"
+     },
+     "details": null,
+     "athlete": {
+      "id": null,
+      "displayName": "Ethan Pocic",
+      "position": {
+       "abbreviation": "C"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634287",
+     "status": "Doubtful",
+     "date": "2026-08-21T02:32Z",
+     "shortComment": "Pinter tore his patella tendon during a joint session against Minnesota on Wednesday, Mike Garafolo of NFL Network reports.",
+     "type": {
+      "abbreviation": "D",
+      "description": "doubtful",
+      "name": "INJURY_STATUS_DOUBTFUL"
+     },
+     "details": {
+      "type": "Leg",
+      "returnDate": "2026-09-13",
+      "fantasyStatus": {
+       "description": "DOUBTFUL",
+       "abbreviation": "DOUBTFUL"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Danny Pinter",
+      "position": {
+       "abbreviation": "C"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634210",
+     "status": "Injured Reserve",
+     "date": "2026-08-20T00:15Z",
+     "shortComment": "Robinson (undisclosed) reverted to the Ravens' injured reserve list Wednesday, Aaron Wilson of KPRC 2 Houston reports.",
+     "type": {
+      "abbreviation": "IR",
+      "description": "Injured Reserve",
+      "name": "INJURY_STATUS_IR"
+     },
+     "details": {
+      "type": "Undisclosed",
+      "returnDate": "2027-02-15",
+      "fantasyStatus": {
+       "description": "IR",
+       "abbreviation": "IR"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Jahquez Robinson",
+      "position": {
+       "abbreviation": "S"
+      },
+      "status": {
+       "name": "Day-To-Day",
+       "type": "day-to-day"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "12",
+   "displayName": "Kansas City Chiefs",
+   "abbreviation": null,
+   "injuries": [
+    {
+     "id": "634365",
+     "status": "Injured Reserve",
+     "date": "2026-08-22T00:32Z",
+     "shortComment": "Waletzko (undisclosed) reverted from waivers to Kansas City's injured reserve list Friday, Aaron Wilson of KPRC 2 Houston reports.",
+     "type": {
+      "abbreviation": "IR",
+      "description": "Injured Reserve",
+      "name": "INJURY_STATUS_IR"
+     },
+     "details": {
+      "type": "Undisclosed",
+      "returnDate": "2027-02-15",
+      "fantasyStatus": {
+       "description": "IR",
+       "abbreviation": "IR"
+      },
+      "detail": "Not Specified"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Matt Waletzko",
+      "position": {
+       "abbreviation": "OT"
+      },
+      "status": {
+       "name": "Day-To-Day",
+       "type": "day-to-day"
+      }
+     }
+    },
+    {
+     "id": "634280",
+     "status": "Questionable",
+     "date": "2026-08-21T01:43Z",
+     "shortComment": "Gillotte has a ruptured plantar fascia, but the injury is not considered serious, Matt Derrick of ChiefsDigest.com reports.",
+     "type": {
+      "abbreviation": "Q",
+      "description": "questionable",
+      "name": "INJURY_STATUS_QUESTIONABLE"
+     },
+     "details": {
+      "type": "Foot",
+      "returnDate": "2026-09-14",
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "detail": "Plantar Fasciitis"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Ashton Gillotte",
+      "position": {
+       "abbreviation": "DE"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634257",
+     "status": "Questionable",
+     "date": "2026-08-21T00:00Z",
+     "shortComment": "Caldwell suffered a hyperextended left knee in Wednesday's practice, Matt Derrick of ChiefsDigest.com reports.",
+     "type": {
+      "abbreviation": "Q",
+      "description": "questionable",
+      "name": "INJURY_STATUS_QUESTIONABLE"
+     },
+     "details": {
+      "type": "Knee",
+      "returnDate": "2026-08-28",
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "detail": "Soreness"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Jeff Caldwell",
+      "position": {
+       "abbreviation": "WR"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634242",
+     "status": "Active",
+     "date": "2026-08-20T20:37Z",
+     "shortComment": "Smith is listed as the No. 4 running back on the unofficial depth chart Kansas City released ahead of the preseason, Pete Grathoff of the Kansas City Star reports.",
+     "type": {
+      "abbreviation": "A",
+      "description": "active",
+      "name": "INJURY_STATUS_ACTIVE"
+     },
+     "details": null,
+     "athlete": {
+      "id": null,
+      "displayName": "Brashard Smith",
+      "position": {
+       "abbreviation": "RB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634241",
+     "status": "Active",
+     "date": "2026-08-20T20:34Z",
+     "shortComment": "Demercado is listed as the No. 2 running back on the unofficial depth chart Kansas City released ahead of the preseason, Pete Grathoff of the Kansas City Star reports.",
+     "type": {
+      "abbreviation": "A",
+      "description": "active",
+      "name": "INJURY_STATUS_ACTIVE"
+     },
+     "details": null,
+     "athlete": {
+      "id": null,
+      "displayName": "Emari Demercado",
+      "position": {
+       "abbreviation": "RB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    },
+    {
+     "id": "634227",
+     "status": "Questionable",
+     "date": "2026-08-20T14:48Z",
+     "shortComment": "Head coach Andy Reid said that Mahomes (knee) won't play in Saturday's preseason game versus the Buccaneers, Matt McMullen of the Chiefs' official site reports.",
+     "type": {
+      "abbreviation": "Q",
+      "description": "questionable",
+      "name": "INJURY_STATUS_QUESTIONABLE"
+     },
+     "details": {
+      "type": "Knee - ACL",
+      "returnDate": "2026-08-28",
+      "fantasyStatus": {
+       "description": "QUESTIONABLE",
+       "abbreviation": "QUESTIONABLE"
+      },
+      "detail": "Surgery"
+     },
+     "athlete": {
+      "id": null,
+      "displayName": "Patrick Mahomes",
+      "position": {
+       "abbreviation": "QB"
+      },
+      "status": {
+       "name": "Active",
+       "type": "active"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

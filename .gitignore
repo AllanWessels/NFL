@@ -19,6 +19,9 @@
 !tests/fixtures/**/*.parquet
 !tests/fixtures/**/*.csv
 !nfl/data/reference/*.csv
+# ...except recorded test fixtures, which the suite cannot run without.
+!tests/fixtures/**/*.parquet
+!tests/fixtures/**/*.csv
 
 # Environments & secrets
 .venv/

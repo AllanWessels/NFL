@@ -1,0 +1,150 @@
+{
+ "season": {
+  "type": 1,
+  "year": 2026
+ },
+ "week": {
+  "number": 3
+ },
+ "events": [
+  {
+   "id": "401873289",
+   "uid": "s:20~l:28~e:401873289",
+   "date": "2026-08-22T23:00Z",
+   "name": "Chicago Bears at Cincinnati Bengals",
+   "shortName": "CHI @ CIN",
+   "season": {
+    "year": 2026,
+    "type": 1,
+    "slug": "preseason"
+   },
+   "week": {
+    "number": 3
+   },
+   "status": {
+    "clock": 783.0,
+    "displayClock": "13:03",
+    "period": 1,
+    "type": {
+     "id": "2",
+     "name": "STATUS_IN_PROGRESS",
+     "state": "in",
+     "completed": false,
+     "description": "In Progress",
+     "detail": "13:03 - 1st Quarter",
+     "shortDetail": "13:03 - 1st"
+    }
+   },
+   "competitions": [
+    {
+     "id": "401873289",
+     "date": "2026-08-22T23:00Z",
+     "neutralSite": false,
+     "playByPlayAvailable": true,
+     "venue": {
+      "id": "3874",
+      "fullName": "Paycor Stadium",
+      "address": {
+       "city": "Cincinnati",
+       "state": "OH",
+       "country": "USA"
+      },
+      "indoor": false
+     },
+     "competitors": [
+      {
+       "id": "4",
+       "homeAway": "home",
+       "score": "0",
+       "team": {
+        "id": "4",
+        "abbreviation": "CIN",
+        "displayName": "Cincinnati Bengals",
+        "location": "Cincinnati",
+        "name": "Bengals"
+       },
+       "records": [
+        {
+         "name": "overall",
+         "abbreviation": "Any",
+         "type": "total",
+         "summary": "1-0"
+        },
+        {
+         "name": "Home",
+         "type": "home",
+         "summary": "1-0"
+        },
+        {
+         "name": "Road",
+         "type": "road",
+         "summary": "0-0"
+        }
+       ]
+      },
+      {
+       "id": "3",
+       "homeAway": "away",
+       "score": "0",
+       "team": {
+        "id": "3",
+        "abbreviation": "CHI",
+        "displayName": "Chicago Bears",
+        "location": "Chicago",
+        "name": "Bears"
+       },
+       "records": [
+        {
+         "name": "overall",
+         "abbreviation": "Any",
+         "type": "total",
+         "summary": "1-0"
+        },
+        {
+         "name": "Home",
+         "type": "home",
+         "summary": "1-0"
+        },
+        {
+         "name": "Road",
+         "type": "road",
+         "summary": "0-0"
+        }
+       ]
+      }
+     ],
+     "situation": {
+      "lastPlay": {
+       "id": "401873289177",
+       "text": " C.Williams pass short right to C.Loveland to CIN 17 for 10 yards (S.Heyward).",
+       "type": {
+        "id": "24",
+        "text": "Pass Reception",
+        "abbreviation": "REC"
+       },
+       "team": {
+        "id": "3"
+       }
+      },
+      "down": 1,
+      "yardLine": 17,
+      "distance": 10,
+      "downDistanceText": "1st & 10 at CIN 17",
+      "shortDownDistanceText": "1st & 10",
+      "possessionText": "CIN 17",
+      "isRedZone": true,
+      "homeTimeouts": 3,
+      "awayTimeouts": 3,
+      "possession": "3"
+     }
+    }
+   ],
+   "weather": {
+    "displayValue": "2",
+    "temperature": 82,
+    "highTemperature": 82,
+    "conditionId": "Mostly sunny"
+   }
+  }
+ ]
+}
