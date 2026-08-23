@@ -559,10 +559,25 @@ def promote(
 
 @app.command()
 def predict(
-    game_id: Annotated[str, typer.Argument(help="Game id, e.g. '2024_18_KC_DEN'.")],
+    game: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "Game id ('2024_18_KC_DEN'), matchup ('DAL@PHI', 'PHI vs DAL'), "
+                "one team ('PHI', 'Eagles'), a Kalshi ticker, or an ESPN event id."
+            )
+        ),
+    ],
     at: Annotated[
         str | None,
         typer.Option("--at", help="Rewind to a game time, e.g. 'Q4 05:00'; omit for latest."),
+    ] = None,
+    season: Annotated[
+        int | None,
+        typer.Option("--season", help="Disambiguate a matchup or team to one season."),
+    ] = None,
+    week: Annotated[
+        int | None, typer.Option("--week", help="Disambiguate a matchup or team to one week.")
     ] = None,
     source: Annotated[
         str,
@@ -582,19 +597,40 @@ def predict(
         bool, typer.Option("--json", help="Print the result as JSON instead of a panel.")
     ] = False,
 ) -> None:
-    """Predict win probability for a game at a point in time and log it to the ledger."""
+    """Predict win probability for a game at a point in time and log it to the ledger.
+
+    GAME accepts anything :func:`nfl.inference.resolve.resolve_game` understands;
+    the resolution is printed before the panel so the answer always says which
+    game it is about. ``--at`` turns off the preference for an upcoming game:
+    asking for a past moment means nearest-kickoff wins outright.
+    """
     import json as json_mod
     from typing import cast
 
     from nfl.inference.predict import PredictionError, Source, predict_game, render_prediction
+    from nfl.inference.resolve import GameSpecError, resolve_game
 
     if source not in ("auto", "espn", "replay"):
         raise typer.BadParameter(
             f"unknown source {source!r}; expected auto | espn | replay", param_hint="--source"
         )
     try:
+        ref = resolve_game(game, season=season, week=week, prefer_upcoming=at is None)
+    except GameSpecError as exc:
+        console.print(f"[red]cannot resolve {game!r}[/red]\n{exc}")
+        raise typer.Exit(1) from exc
+    except (FileNotFoundError, KeyError) as exc:
+        console.print(f"[red]cannot read the schedules table[/red]: {exc}")
+        raise typer.Exit(1) from exc
+
+    if not as_json:
+        console.print(f"[dim]{ref.describe()}[/dim]")
+        if ref.note:
+            console.print(f"[yellow]{ref.note}[/yellow]")
+
+    try:
         result = predict_game(
-            game_id,
+            ref.game_id,
             at=at,
             source=cast("Source", source),
             model=model,
@@ -604,7 +640,7 @@ def predict(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
     except (FileNotFoundError, KeyError, ValueError) as exc:
-        console.print(f"[red]cannot predict {game_id}[/red]: {exc}")
+        console.print(f"[red]cannot predict {ref.game_id}[/red]: {exc}")
         raise typer.Exit(1) from exc
 
     if as_json:
