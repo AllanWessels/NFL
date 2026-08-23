@@ -38,6 +38,21 @@ on GCP.
 7. **Concise output.** Reports state what changed, what passed, what is
    uncertain. No filler, no restating the plan back.
 
+## Slash commands (preferred over raw `uv run`)
+
+| command | does |
+|---|---|
+| `/predict <game> [--at "Q4 05:00"]` | win probability + confidence + trade gate, logs to ledger |
+| `/retrain [--skip-ingest]` | weekly pipeline: ingest → features → train → ensemble → gate → promote |
+| `/evaluate` | ledger accuracy/calibration/edge vs market + drift flag |
+| `/ledger [--last 20]` | recent predictions with resolved outcomes |
+| `/status` | production model, last retrain, drift |
+| `/ingest [--seasons 2026]` | data refresh + feature rebuild only |
+| `/snapshot <game>` | live game state without predicting |
+| `/promote [--candidate ensemble_v1]` | run the gate on a candidate |
+
+Weekly routine: Tuesday `/retrain`; game day `/predict TEAM@TEAM` late in Q4; Monday `/evaluate`.
+
 ## Commands
 
 ```bash
