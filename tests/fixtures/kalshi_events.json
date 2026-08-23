@@ -1,0 +1,52 @@
+{
+  "events": [
+    {
+      "event_ticker": "KXNFLGAME-26AUG29CHITEN",
+      "series_ticker": "KXNFLGAME",
+      "title": "Chicago Bears vs Tennessee Titans",
+      "markets": [
+        {
+          "ticker": "KXNFLGAME-26AUG29CHITEN-CHI",
+          "event_ticker": "KXNFLGAME-26AUG29CHITEN",
+          "title": "CHI Bears wins",
+          "yes_sub_title": "CHI Bears",
+          "status": "active",
+          "result": "",
+          "yes_bid_dollars": "0.5900",
+          "yes_ask_dollars": "0.6400",
+          "no_bid_dollars": "0.3600",
+          "no_ask_dollars": "0.4100",
+          "last_price_dollars": "0.6600",
+          "volume": null,
+          "volume_fp": "91.51",
+          "open_interest_fp": "71.51",
+          "liquidity_dollars": "0.0000",
+          "close_time": "2026-08-31T22:00:00Z",
+          "occurrence_datetime": "2026-08-30T01:00:00Z",
+          "market_type": "binary"
+        },
+        {
+          "ticker": "KXNFLGAME-26AUG29CHITEN-TEN",
+          "event_ticker": "KXNFLGAME-26AUG29CHITEN",
+          "title": "TEN Titans wins",
+          "yes_sub_title": "TEN Titans",
+          "status": "active",
+          "result": "",
+          "yes_bid_dollars": "0.3600",
+          "yes_ask_dollars": "0.4400",
+          "no_bid_dollars": "0.5600",
+          "no_ask_dollars": "0.6400",
+          "last_price_dollars": "0.4000",
+          "volume": null,
+          "volume_fp": "88.00",
+          "open_interest_fp": "71.51",
+          "liquidity_dollars": "0.0000",
+          "close_time": "2026-08-31T22:00:00Z",
+          "occurrence_datetime": "2026-08-30T01:00:00Z",
+          "market_type": "binary"
+        }
+      ]
+    }
+  ],
+  "cursor": ""
+}

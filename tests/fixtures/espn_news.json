@@ -1,0 +1,48 @@
+{
+  "header": "NFL News",
+  "articles": [
+    {
+      "id": 1001,
+      "headline": "Broncos QB Bo Nix out for the season with torn Achilles",
+      "description": "Denver will turn to its backup quarterback.",
+      "published": "2026-08-21T13:00:00Z",
+      "type": "Story",
+      "categories": [
+        {"type": "team", "teamId": 7, "team": {"id": "7"}},
+        {"type": "athlete", "athleteId": 4361741}
+      ]
+    },
+    {
+      "id": 1002,
+      "headline": "Chiefs activate Rashee Rice, cleared to play Sunday",
+      "description": "Rice was a full participant in practice Friday.",
+      "published": "2026-08-22T15:30:00Z",
+      "type": "Story",
+      "categories": [{"type": "team", "teamId": 12, "team": {"id": "12"}}]
+    },
+    {
+      "id": 1003,
+      "headline": "Chiefs open as 7.5-point favorite; betting line moves toward Kansas City",
+      "description": "The point spread shifted overnight at several sportsbooks.",
+      "published": "2026-08-22T16:00:00Z",
+      "type": "Story",
+      "categories": [{"type": "team", "teamId": 12, "team": {"id": "12"}}]
+    },
+    {
+      "id": 1004,
+      "headline": "Stale headline from before the window",
+      "description": "Should be gated out.",
+      "published": "2026-07-01T10:00:00Z",
+      "type": "Story",
+      "categories": [{"type": "team", "teamId": 12, "team": {"id": "12"}}]
+    },
+    {
+      "id": 1005,
+      "headline": "",
+      "description": "Empty headline is skipped.",
+      "published": "2026-08-22T16:05:00Z",
+      "type": "Story",
+      "categories": []
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+position,position_group,impact_weight,replacement_dropoff,notes
+QB,QB,1.00,0.85,Starting quarterback; by far the largest single-player swing.
+RB,RB,0.12,0.45,Committee usage makes RB absence cheap on average.
+FB,RB,0.04,0.30,Rarely a meaningful snap share.
+HB,RB,0.12,0.45,Alias for RB used by some feeds.
+WR,WR,0.18,0.55,Weight is for a nominal WR1; scale by snap/target share.
+TE,TE,0.14,0.50,Blocking + receiving dual role.
+OT,OL,0.24,0.60,Tackle; blindside side unknown from the abbreviation alone.
+LT,OL,0.28,0.65,Blindside tackle; highest-value non-QB offensive lineman.
+RT,OL,0.20,0.55,
+T,OL,0.24,0.60,Alias for OT.
+G,OL,0.16,0.50,
+OG,OL,0.16,0.50,Alias for G.
+C,OL,0.20,0.55,Line calls plus snap exchange risk.
+OL,OL,0.18,0.55,Unspecified interior/exterior lineman.
+DE,DL,0.22,0.55,
+EDGE,DL,0.24,0.60,Premium pass rusher.
+DT,DL,0.18,0.50,
+NT,DL,0.14,0.45,Run-down snaps only for many teams.
+DL,DL,0.20,0.52,Unspecified defensive lineman.
+LB,LB,0.14,0.45,
+ILB,LB,0.13,0.45,
+MLB,LB,0.14,0.45,Green-dot defensive signal caller in many schemes.
+OLB,LB,0.16,0.50,Often an edge rusher in 3-4 fronts.
+CB,DB,0.20,0.55,Weight is for a nominal CB1.
+DB,DB,0.16,0.50,Unspecified defensive back.
+S,DB,0.14,0.45,
+FS,DB,0.14,0.45,
+SS,DB,0.13,0.45,
+SAF,DB,0.14,0.45,Alias for S.
+K,ST,0.08,0.60,Small but high-variance in close games.
+PK,ST,0.08,0.60,Alias for K.
+P,ST,0.05,0.45,
+LS,ST,0.03,0.70,Low weight, high dropoff: replacements snap badly.
+KR,ST,0.03,0.30,
+PR,ST,0.03,0.30,
+ATH,ST,0.05,0.40,Unclassified athlete; conservative default.

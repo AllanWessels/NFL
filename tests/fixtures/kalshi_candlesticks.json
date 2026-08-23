@@ -1,0 +1,21 @@
+{
+  "ticker": "KXNFLGAME-26AUG29CHITEN-TEN",
+  "candlesticks": [
+    {
+      "end_period_ts": 1756515600000,
+      "price": {"open": "0.4000", "high": "0.4200", "low": "0.3900", "close": "0.4100", "mean": "0.4050"},
+      "yes_bid": {"close": "0.3900"},
+      "yes_ask": {"close": "0.4300"},
+      "volume_fp": "12.00",
+      "open_interest_fp": "70.00"
+    },
+    {
+      "end_period_ts": 1756519200000,
+      "price": {"open": "0.4100", "high": "0.4600", "low": "0.4100", "close": "0.4500"},
+      "yes_bid": {"close": "0.4400"},
+      "yes_ask": {"close": "0.4600"},
+      "volume_fp": "31.00",
+      "open_interest_fp": "84.00"
+    }
+  ]
+}
