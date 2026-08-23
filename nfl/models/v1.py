@@ -5,9 +5,14 @@ and the promotion decision is computed rather than eyeballed:
 
 1. the naive logistic floor, exactly as Phase 5 defined it (nine columns, no
    weighting) — changing the floor would make the comparison meaningless;
-2. XGBoost on the ``v1`` feature set, game-weighted, early-stopped on val Q4;
-3. ``tf_seq`` (GRU) on ``v1``, same weighting and same selection metric;
-4. ``tf_mlp`` on ``v1``, likewise — cheap enough to keep in the line-up.
+2. XGBoost on :data:`~nfl.models.feature_sets.V1_FEATURE_SET`, game-weighted,
+   early-stopped on val Q4;
+3. ``tf_seq`` (GRU) on the same set, same weighting and same selection metric;
+4. ``tf_mlp`` likewise — cheap enough to keep in the line-up.
+
+The feature set is ``servable``: in-play state minus the 89 columns a
+:class:`~nfl.data.live.base.LiveSnapshot` cannot fill. Training on those 89 and
+serving nulls is training one model and shipping another.
 
 Every model is then scored with :func:`nfl.models.metrics.slice_metrics` on
 *both* the validation season and the held-out test seasons, over the slices the
@@ -40,6 +45,7 @@ import polars as pl
 
 from nfl.models.artifacts import MANIFEST_NAME, model_dir
 from nfl.models.data import ModelFrames, design_matrix, labels, load_model_frames
+from nfl.models.feature_sets import V1_FEATURE_SET
 from nfl.models.metrics import Q4_MARKS, slice_metrics
 
 __all__ = [
@@ -174,6 +180,7 @@ def train_and_report(
     xgb_configs: Sequence[tuple[str, str, dict[str, Any]]] | None = None,
     seq_params: dict[str, Any] | None = None,
     mlp_params: dict[str, Any] | None = None,
+    feature_set: str = V1_FEATURE_SET,
     include_mlp: bool = True,
     device: str = "auto",
     save: bool = True,
@@ -215,16 +222,19 @@ def train_and_report(
     # More than one is allowed because the feature-set question is not settled
     # by the ADR alone: ``inplay`` and ``v1`` differ by ten columns and the
     # report is what decides between them.
-    configs = list(xgb_configs or [("xgb-v1", "v1", dict(xgb_params or {}))])
+    configs = list(xgb_configs or [("xgb-v1", feature_set, dict(xgb_params or {}))])
     xgb_fits: list[tuple[str, Any, Any]] = []
-    for label, feature_set, params in configs:
+    # ``config_set`` rather than ``feature_set``: rebinding the parameter here
+    # would silently train the GRU and the MLP below on whichever set the *last*
+    # XGBoost config happened to name.
+    for label, config_set, params in configs:
         t0 = time.perf_counter()
         xgb_model, xgb_res = train_xgboost(
             frames=data,
             models_root=models_root,
             device=device,
             params=dict(params),
-            feature_set=feature_set,
+            feature_set=config_set,
             weight_by_game=True,
             selection_metric="q4",
             save=save,
@@ -244,7 +254,7 @@ def train_and_report(
     seq_model, seq_res = train_tf_seq(
         root=root,
         models_root=models_root,
-        feature_set="v1",
+        feature_set=feature_set,
         selection_metric="q4",
         weight_by_game=True,
         save=save,
@@ -260,7 +270,7 @@ def train_and_report(
     if save:
         _amend_manifest(
             model_dir(seq_model.name, seq_res.version, root=models_root),
-            {"feature_set": "v1", "weight_by_game": True, "selection_metric": "q4"},
+            {"feature_set": feature_set, "weight_by_game": True, "selection_metric": "q4"},
         )
 
     # -- 4. tf_mlp v1 (optional) -------------------------------------------- #
@@ -270,7 +280,7 @@ def train_and_report(
         mlp_model, mlp_res = train_tf_mlp(
             root=root,
             models_root=models_root,
-            feature_set="v1",
+            feature_set=feature_set,
             selection_metric="q4",
             weight_by_game=True,
             save=save,
@@ -282,7 +292,7 @@ def train_and_report(
         if save:
             _amend_manifest(
                 model_dir(mlp_model.name, mlp_res.version, root=models_root),
-                {"feature_set": "v1", "weight_by_game": True, "selection_metric": "q4"},
+                {"feature_set": feature_set, "weight_by_game": True, "selection_metric": "q4"},
             )
         extra_stamps.append(("mlp-v1", mlp_model.name, mlp_res))
 

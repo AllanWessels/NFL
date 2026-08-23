@@ -92,15 +92,21 @@ __all__ = [
     "NAIVE_FLOOR",
     "NOT_COLLAPSED_OWN_SLICE",
     "NOT_COLLAPSED_SLICE",
+    "SERVING_PARITY_SAMPLES",
+    "SERVING_PARITY_SLICE",
+    "SERVING_PARITY_TOLERANCE",
     "GateCheck",
     "GateResult",
+    "ParitySample",
     "RegistryMember",
+    "ServingParity",
     "UncertainRegistryMember",
     "gate_table",
     "load_member",
     "member_context",
     "promotion_gate",
     "reference_probabilities",
+    "serving_parity",
     "split_member_spec",
     "train_ensemble",
 ]
@@ -162,6 +168,27 @@ GATE_METRICS: tuple[str, ...] = ("log_loss", "brier")
 #: Float slack when asking "is this *not worse*". Guards against a comparison
 #: failing on the last bit of a float, not against a real regression.
 GATE_TOLERANCE = 1e-9
+
+#: The gate's third condition, alongside the Q4 marks and ``not_collapsed``:
+#: the probability ``nfl predict`` serves for a snapshot must be the probability
+#: the model recorded for that play offline.
+#:
+#: Every number in the promotion table is measured on the *offline* dataset. If
+#: the serving path produces a different vector — 89 in-play columns arriving
+#: null, a GRU windowing over one play instead of thirty-two, a GBDT re-binning
+#: itself because it was handed one row — then the gate is comparing a model
+#: that is not the one being promoted, and every backtest number describes
+#: something that never reaches production. This condition is what makes the
+#: rest of the table mean anything.
+SERVING_PARITY_SLICE = "serving_parity"
+
+#: How far apart the two probabilities may be. 0.02 is a fifth of the width of
+#: the 15/85 trade band's nearest edge — small enough that no trading decision
+#: can turn on the difference.
+SERVING_PARITY_TOLERANCE = 0.02
+
+#: How many ``(game, Q4 time)`` snapshots the condition samples from val.
+SERVING_PARITY_SAMPLES = 20
 
 
 # --------------------------------------------------------------------------- #
@@ -1074,6 +1101,8 @@ class GateResult:
     floor_version: str
     checks: list[GateCheck] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: What the serving-parity condition measured, when it was run.
+    serving_parity: ServingParity | None = None
 
     @property
     def passed(self) -> bool:
@@ -1099,6 +1128,188 @@ def _reference_pin(name: str, version: str, root: Path | None) -> str | None:
     return str(pin) if pin else None
 
 
+@dataclass(frozen=True)
+class ParitySample:
+    """One ``(game, Q4 time)`` snapshot scored down both paths."""
+
+    game_id: str
+    quarter_seconds: int
+    play_index: int
+    p_serving: float
+    p_offline: float
+
+    @property
+    def delta(self) -> float:
+        return abs(self.p_serving - self.p_offline)
+
+    def __str__(self) -> str:
+        clock = f"{self.quarter_seconds // 60}:{self.quarter_seconds % 60:02d}"
+        return (
+            f"{self.game_id} Q4 {clock}: serving {self.p_serving:.4f} "
+            f"offline {self.p_offline:.4f} (Δ {self.delta:.4f})"
+        )
+
+
+@dataclass(frozen=True)
+class ServingParity:
+    """What :func:`serving_parity` measured, and whether it clears."""
+
+    tolerance: float
+    samples: list[ParitySample] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+    @property
+    def worst(self) -> float:
+        return max((s.delta for s in self.samples), default=float("nan"))
+
+    @property
+    def mean(self) -> float:
+        return float(np.mean([s.delta for s in self.samples])) if self.samples else float("nan")
+
+    @property
+    def passed(self) -> bool:
+        return bool(self.samples) and self.worst <= self.tolerance
+
+    def table(self) -> pl.DataFrame:
+        """One row per sample, worst first."""
+        return pl.DataFrame(
+            [
+                {
+                    "game_id": s.game_id,
+                    "at": f"Q4 {s.quarter_seconds // 60:02d}:{s.quarter_seconds % 60:02d}",
+                    "play_index": s.play_index,
+                    "p_serving": s.p_serving,
+                    "p_offline": s.p_offline,
+                    "delta": s.delta,
+                    "verdict": "pass" if s.delta <= self.tolerance else "FAIL",
+                }
+                for s in sorted(self.samples, key=lambda s: -s.delta)
+            ],
+            schema={
+                "game_id": pl.String,
+                "at": pl.String,
+                "play_index": pl.Int64,
+                "p_serving": pl.Float64,
+                "p_offline": pl.Float64,
+                "delta": pl.Float64,
+                "verdict": pl.String,
+            },
+        )
+
+
+def _parity_snapshots(
+    val: pl.DataFrame, n: int, *, seed: int = 17, low: int = 30, high: int = 900
+) -> list[dict[str, Any]]:
+    """``n`` distinct ``(game, Q4 snap)`` rows from ``val``, one per game.
+
+    Only real snaps — a row with no down is an administrative play a snapshot
+    would not be asked to predict from — and only Q4, which is the phase the
+    project is judged on.
+    """
+    q4 = val.filter(
+        (pl.col("ig__quarter") == 4)
+        & pl.col("ig__down").is_not_null()
+        & pl.col("ig__quarter_seconds_remaining").is_between(low, high)
+    )
+    if q4.is_empty():
+        return []
+    picked = (
+        q4.sample(fraction=1.0, shuffle=True, seed=seed)
+        .unique(subset=["meta__game_id"], keep="first")
+        .sort("meta__game_id")
+        .head(n)
+    )
+    return picked.to_dicts()
+
+
+def serving_parity(
+    candidate: str,
+    version: str | None = None,
+    *,
+    n: int = SERVING_PARITY_SAMPLES,
+    tolerance: float = SERVING_PARITY_TOLERANCE,
+    root: Path | None = None,
+    data_root: Path | None = None,
+    frames: ModelFrames | None = None,
+    pbp: pl.DataFrame | None = None,
+    schedules: pl.DataFrame | None = None,
+    seed: int = 17,
+) -> ServingParity:
+    """Score ``n`` val snapshots down **both** paths and compare.
+
+    The serving side is the real thing: :func:`nfl.inference.predict.predict_game`
+    against the replay feed, which snapshots the game, rebuilds every feature
+    from the snapshot and projects it onto the artifact's manifest. The offline
+    side is the assembled dataset row for the same play, scored through the same
+    model object. Nothing is mocked, so a difference is a difference the
+    production endpoint would actually serve.
+
+    Snapshots are taken at each sampled play's **own** clock. Ask for a round
+    ``Q4 05:00`` and the snapshot reports 300 seconds while the play-by-play row
+    for the snap reports whatever the clock read at the snap; every
+    clock-derived column then differs by that gap and the measurement is about
+    the gap rather than about the pipeline. A sample whose snapshot lands on a
+    different play than the one requested is dropped and recorded, never
+    silently compared.
+    """
+    from nfl.data.live.base import AtTime
+    from nfl.inference import predict as predict_mod
+
+    data = frames if frames is not None else load_model_frames(root=data_root)
+    candidate_name = _registry_name(candidate, root)
+    resolved = version or registry.latest(candidate_name, root)
+
+    model, ref, _ = predict_mod.load_model(f"{candidate_name}:{resolved}", root=root)
+    names = list(ref.feature_names) or list(data.features)
+    windowed = predict_mod.needs_play_window(model)
+
+    samples: list[ParitySample] = []
+    skipped: list[str] = []
+    for row in _parity_snapshots(data.val, n, seed=seed):
+        game_id = str(row["meta__game_id"])
+        seconds = int(row["ig__quarter_seconds_remaining"])
+        play_index = int(row["ig__play_index"])
+        try:
+            served = predict_mod.predict_game(
+                game_id,
+                at=AtTime(quarter=4, clock_seconds=seconds),
+                source="replay",
+                model=f"{candidate_name}:{resolved}",
+                models_root=root,
+                pbp=pbp,
+                schedules=schedules,
+                write_ledger=False,
+                attach_market=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - a candidate that cannot serve fails the gate
+            skipped.append(f"{game_id} Q4 {seconds}s: serving path raised {exc}")
+            continue
+        if served.snapshot.play_count != play_index:
+            skipped.append(
+                f"{game_id} Q4 {seconds}s: snapshot landed on play {served.snapshot.play_count}, "
+                f"the dataset row is play {play_index}"
+            )
+            continue
+
+        game = data.val.filter(pl.col("meta__game_id") == game_id).sort("ig__play_index")
+        upto = game.filter(pl.col("ig__play_index") <= play_index)
+        rows = upto if windowed else upto.tail(1)
+        meta = rows.select("meta__game_id", "meta__play_id") if windowed else None
+        p_offline, *_ = predict_mod._predict_with_confidence(  # noqa: SLF001
+            model, design_matrix(rows, names), meta
+        )
+        samples.append(
+            ParitySample(
+                game_id=game_id,
+                quarter_seconds=seconds,
+                play_index=play_index,
+                p_serving=float(served.p_home),
+                p_offline=float(p_offline),
+            )
+        )
+    return ServingParity(tolerance=tolerance, samples=samples, skipped=skipped)
+
+
 def promotion_gate(
     candidate: str,
     version: str | None = None,
@@ -1107,6 +1318,9 @@ def promotion_gate(
     floor_version: str | None = None,
     root: Path | None = None,
     tolerance: float = GATE_TOLERANCE,
+    parity_samples: int = SERVING_PARITY_SAMPLES,
+    parity_tolerance: float = SERVING_PARITY_TOLERANCE,
+    data_root: Path | None = None,
 ) -> GateResult:
     """Compare a candidate against the naive floor on the val slices.
 
@@ -1122,6 +1336,15 @@ def promotion_gate(
     recorded the same floor pin as the one being compared, and notes it loudly
     when either says otherwise (a manifest written before this rule, or one
     referenced against a floor that has since been retrained).
+
+    **Serving parity** is the gate's third condition and the only one that is
+    measured rather than read back: ``parity_samples`` val snapshots are scored
+    through :func:`nfl.inference.predict.predict_game` and through the offline
+    dataset row for the same play, and the worst absolute difference must be
+    within ``parity_tolerance``. Everything else in this table is an offline
+    number; without this condition, none of them are promises about what
+    production will serve. Pass ``parity_samples=0`` to compare manifests only —
+    which is a comparison of two artifacts, not a promotion decision.
     """
     candidate_name = _registry_name(candidate, root)
     candidate_version = version or registry.latest(candidate_name, root)
@@ -1197,6 +1420,44 @@ def promotion_gate(
                 )
             )
 
+    parity: ServingParity | None = None
+    if parity_samples > 0:
+        try:
+            parity = serving_parity(
+                candidate_name,
+                candidate_version,
+                n=parity_samples,
+                tolerance=parity_tolerance,
+                root=root,
+                data_root=data_root,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unmeasurable candidate is not promotable
+            notes.append(
+                f"serving parity could not be measured ({exc}); a candidate whose serving "
+                "path cannot be demonstrated is not promotable — treated as a failure"
+            )
+            parity = ServingParity(tolerance=parity_tolerance)
+        for line in parity.skipped:
+            notes.append(f"parity sample dropped — {line}")
+        if not parity.samples:
+            notes.append(
+                f"serving parity produced no comparable samples out of {parity_samples} "
+                "requested; there is nothing to promote on"
+            )
+        else:
+            worst = max(parity.samples, key=lambda s: s.delta)
+            notes.append(f"serving parity worst of {len(parity.samples)}: {worst}")
+        checks.append(
+            GateCheck(
+                slice=SERVING_PARITY_SLICE,
+                metric="max_abs_delta",
+                candidate=parity.worst,
+                floor=parity_tolerance,
+                strict=False,
+                passed=parity.passed,
+            )
+        )
+
     return GateResult(
         candidate=candidate_name,
         candidate_version=candidate_version,
@@ -1204,6 +1465,7 @@ def promotion_gate(
         floor_version=resolved_floor,
         checks=checks,
         notes=notes,
+        serving_parity=parity,
     )
 
 

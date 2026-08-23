@@ -7,15 +7,29 @@ games wearing 622k rows). So v1 trains on the live in-play state plus a
 deliberately tiny pre-game prior, and the rest of the table stays in the
 dataset for research only.
 
-Four names, resolved against whatever columns a frame actually has:
+Six names, resolved against whatever columns a frame actually has:
 
 ``inplay``
     Everything prefixed ``bi__`` (the 25 scoreboard/situation columns) or
     ``ig__`` (the 220 running in-game aggregates). 245 columns.
+``servable``
+    ``inplay`` minus the columns the serving path cannot produce — see
+    :data:`UNSERVABLE_COLUMNS`. **156 columns**, and the v1 default: a model
+    trained on ``inplay`` is trained on 89 columns that arrive null at serve
+    time, which is a different model than the one that was measured.
 ``prior``
     :data:`PRIOR_COLUMNS` — ten pre-game numbers, listed and justified below.
+``servable_prior``
+    ``prior`` minus the two QB1 columns the serving path rebuilds differently
+    (see :data:`UNSERVABLE_PRIOR_COLUMNS`). Eight columns.
+``servable_v1``
+    ``servable + servable_prior``. Everything v1 is allowed to see *and* can
+    actually be served, so the in-play block keeps its pre-game context.
 ``v1``
-    ``inplay + prior``. The ADR 0003 model input.
+    ``inplay + prior``. The ADR 0003 model input as first written, kept so
+    artifacts that recorded ``feature_set="v1"`` keep resolving to the columns
+    they were trained on. New training runs use ``servable`` /
+    ``servable_v1`` — :data:`V1_FEATURE_SET`.
 ``full``
     Every feature column on the frame; the Phase 5 baseline, kept so the
     v1-vs-full comparison can still be run.
@@ -30,6 +44,8 @@ design-matrix column order.
     >>> df = pl.DataFrame({"bi__down": [1.0], "ctx__is_indoors": [1], "meta__season": [2024]})
     >>> feature_set_columns(df, "v1")
     ['bi__down', 'ctx__is_indoors']
+    >>> feature_set_columns(df, "servable")
+    ['bi__down']
 """
 
 from __future__ import annotations
@@ -39,15 +55,22 @@ from collections.abc import Sequence
 import polars as pl
 
 from nfl.features.assemble import feature_columns
+from nfl.features.ingame import SNAPSHOT_UNKNOWABLE_COLUMNS
 
 __all__ = [
     "FEATURE_SET_NAMES",
     "INPLAY_PREFIXES",
     "PRIOR_COLUMNS",
+    "UNSERVABLE_CLOCK_COLUMNS",
+    "UNSERVABLE_COLUMNS",
+    "UNSERVABLE_PRIOR_COLUMNS",
+    "V1_FEATURE_SET",
     "feature_set_columns",
     "inplay_columns",
     "prior_columns",
     "select_features",
+    "servable_columns",
+    "servable_prior_columns",
 ]
 
 #: The two families that describe the live state of the game in progress.
@@ -104,8 +127,68 @@ PRIOR_COLUMNS: tuple[str, ...] = (
     "ctx__is_postseason",
 )
 
+#: Clock-derived in-play columns excluded from ``servable`` because the serving
+#: path cannot reproduce them.
+#:
+#: **Measured, not assumed.** 134 replay snapshots across 40 val-season games,
+#: each taken at its own play's clock so no request-vs-snap gap is in play, were
+#: compared column by column against the assembled dataset row for that play.
+#: Of the 156 in-play columns that survive :data:`UNSERVABLE_COLUMNS`, exactly
+#: one ever disagreed — ``bi__goal_to_go``, and only on administrative rows
+#: (a timeout has no yard line) where the serving derivation returned null and
+#: nflverse writes ``0``. That was a bug in
+#: :func:`nfl.features.ingame.snapshot_play_frame`, not an irreproducible
+#: column, and it is fixed; the set is therefore empty.
+#:
+#: Every column in :data:`nfl.features.ingame.SNAPSHOT_CLOCK_SENSITIVE_COLUMNS`
+#: *is* servable: it differs from the training row only when the snapshot is
+#: rewound to a time that is not a snap, and then it differs by the clock gap
+#: itself. Excluding ``ig__game_seconds_remaining`` from a win-probability model
+#: to avoid an 11-second gap would cost far more than the gap does; the gate
+#: samples at the snap's own clock instead, where the gap is zero.
+UNSERVABLE_CLOCK_COLUMNS: frozenset[str] = frozenset()
+
+#: The ten :data:`PRIOR_COLUMNS` are not all servable. The two QB1 columns are
+#: rebuilt at serve time from the snapshot's injury list by
+#: :func:`nfl.features.player.roster_from_snapshot`, which is a different
+#: computation from the as-of-kickoff offline one, and they disagreed on
+#: **all** 134 sampled snapshots. The other eight — Elo, power rating, rest,
+#: and the four venue/context flags — matched on every one.
+UNSERVABLE_PRIOR_COLUMNS: frozenset[str] = frozenset(
+    {
+        "home_pl__qb1_adj_epa_per_dropback",
+        "away_pl__qb1_adj_epa_per_dropback",
+    }
+)
+
+#: The feature set new v1 training runs use. ``servable`` per ADR 0003 as
+#: amended: in-play state only, and only the part of it that survives the trip
+#: through a :class:`~nfl.data.live.base.LiveSnapshot`.
+V1_FEATURE_SET = "servable"
+
+#: In-play columns a model must not be trained on, because ``nfl predict``
+#: cannot fill them.
+#:
+#: :data:`nfl.features.ingame.SNAPSHOT_UNKNOWABLE_COLUMNS` — 89 of the 245
+#: in-play columns — is the bulk of it: per-play EPA, completions, first downs,
+#: sacks, penalties, kick results. A :class:`~nfl.data.live.base.LivePlay`
+#: carries a play's type, yardage, scores and coarse turnover/penalty flags and
+#: nothing else, so every aggregate built on the detail is null at serve time
+#: and populated in training. A GBDT trained on those 89 columns and served
+#: 89 nulls takes a different path down every tree it learned; the measured
+#: shift on the v1 XGBoost artifact was ~0.06 in probability.
+UNSERVABLE_COLUMNS: frozenset[str] = SNAPSHOT_UNKNOWABLE_COLUMNS | UNSERVABLE_CLOCK_COLUMNS
+
 #: Every name :func:`feature_set_columns` accepts.
-FEATURE_SET_NAMES: tuple[str, ...] = ("inplay", "prior", "v1", "full")
+FEATURE_SET_NAMES: tuple[str, ...] = (
+    "inplay",
+    "servable",
+    "prior",
+    "servable_prior",
+    "v1",
+    "servable_v1",
+    "full",
+)
 
 
 def _features(df: pl.DataFrame) -> list[str]:
@@ -124,6 +207,16 @@ def prior_columns(df: pl.DataFrame) -> list[str]:
     return [c for c in PRIOR_COLUMNS if c in have]
 
 
+def servable_columns(df: pl.DataFrame) -> list[str]:
+    """The in-play columns the serving path actually produces, in frame order."""
+    return [c for c in inplay_columns(df) if c not in UNSERVABLE_COLUMNS]
+
+
+def servable_prior_columns(df: pl.DataFrame) -> list[str]:
+    """:func:`prior_columns` minus :data:`UNSERVABLE_PRIOR_COLUMNS`."""
+    return [c for c in prior_columns(df) if c not in UNSERVABLE_PRIOR_COLUMNS]
+
+
 def feature_set_columns(df: pl.DataFrame, name: str) -> list[str]:
     """Column names of the named feature set, resolved against ``df``.
 
@@ -136,10 +229,16 @@ def feature_set_columns(df: pl.DataFrame, name: str) -> list[str]:
         raise ValueError(f"unknown feature set {name!r}; expected one of {list(FEATURE_SET_NAMES)}")
     if key == "inplay":
         cols = inplay_columns(df)
+    elif key == "servable":
+        cols = servable_columns(df)
     elif key == "prior":
         cols = prior_columns(df)
+    elif key == "servable_prior":
+        cols = servable_prior_columns(df)
     elif key == "v1":
         cols = inplay_columns(df) + prior_columns(df)
+    elif key == "servable_v1":
+        cols = servable_columns(df) + servable_prior_columns(df)
     else:
         cols = _features(df)
     if not cols:

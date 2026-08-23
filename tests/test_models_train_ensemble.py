@@ -545,7 +545,7 @@ def _floor_and_candidate(root, *, candidate_slices, floor_slices=None, flat_mani
 def test_gate_passes_when_the_candidate_beats_the_floor_everywhere(tmp_path):
     root = tmp_path / "models"
     _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.55))
-    result = promotion_gate("cand", root=root)
+    result = promotion_gate("cand", root=root, parity_samples=0)
     assert result.passed
     assert result.floor == "naive_score_time"
     assert len(result.checks) == len(GATE_Q4_SLICES) * len(GATE_METRICS) + len(GATE_METRICS)
@@ -556,13 +556,13 @@ def test_gate_reads_a_flat_manifest_the_same_way(tmp_path):
     _floor_and_candidate(
         root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.55), flat_manifest=True
     )
-    assert promotion_gate("cand", root=root).passed
+    assert promotion_gate("cand", root=root, parity_samples=0).passed
 
 
 def test_gate_fails_when_brier_regresses_even_though_log_loss_improves(tmp_path):
     root = tmp_path / "models"
     _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.12, not_collapsed=0.55))
-    result = promotion_gate("cand", root=root)
+    result = promotion_gate("cand", root=root, parity_samples=0)
     assert not result.passed
     failed = {(c.slice, c.metric) for c in result.checks if not c.passed}
     assert failed == {(s, "brier") for s in GATE_Q4_SLICES}
@@ -571,7 +571,7 @@ def test_gate_fails_when_brier_regresses_even_though_log_loss_improves(tmp_path)
 def test_gate_fails_when_not_collapsed_regresses(tmp_path):
     root = tmp_path / "models"
     _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.65))
-    result = promotion_gate("cand", root=root)
+    result = promotion_gate("cand", root=root, parity_samples=0)
     assert not result.passed
     assert {c.metric for c in result.checks if not c.passed} == set(GATE_METRICS)
     assert {c.slice for c in result.checks if not c.passed} == {NOT_COLLAPSED_SLICE}
@@ -581,7 +581,7 @@ def test_not_collapsed_only_has_to_be_no_worse(tmp_path):
     """Q4 must *improve*; not-collapsed only must not degrade."""
     root = tmp_path / "models"
     _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.60))
-    result = promotion_gate("cand", root=root)
+    result = promotion_gate("cand", root=root, parity_samples=0)
     assert result.passed
     tie = [c for c in result.checks if c.slice == NOT_COLLAPSED_SLICE]
     assert all(c.delta == pytest.approx(0.0) for c in tie)
@@ -591,14 +591,14 @@ def test_not_collapsed_only_has_to_be_no_worse(tmp_path):
 def test_a_tie_on_a_q4_metric_is_not_good_enough(tmp_path):
     root = tmp_path / "models"
     _floor_and_candidate(root, candidate_slices=_slices(0.30, 0.10, not_collapsed=0.55))
-    assert not promotion_gate("cand", root=root).passed
+    assert not promotion_gate("cand", root=root, parity_samples=0).passed
 
 
 def test_a_missing_slice_fails_rather_than_being_skipped(tmp_path):
     root = tmp_path / "models"
     partial = [row for row in _slices(0.25, 0.08) if row["slice"] != "q4_120s"]
     _floor_and_candidate(root, candidate_slices=partial)
-    result = promotion_gate("cand", root=root)
+    result = promotion_gate("cand", root=root, parity_samples=0)
     assert not result.passed
     assert any("q4_120s" in note for note in result.notes)
 
@@ -610,13 +610,13 @@ def test_a_manifest_without_val_slices_explains_itself(tmp_path):
     )
     _save(ConstantModel(p=0.5, name="cand"), root, "cand", "20240102T000000")
     with pytest.raises(ValueError, match="no val_slices"):
-        promotion_gate("cand", root=root)
+        promotion_gate("cand", root=root, parity_samples=0)
 
 
 def test_the_gate_table_shows_both_sides_and_the_verdict(tmp_path):
     root = tmp_path / "models"
     _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.55))
-    table = gate_table(promotion_gate("cand", root=root))
+    table = gate_table(promotion_gate("cand", root=root, parity_samples=0))
     assert table.columns == [
         "slice",
         "metric",
@@ -679,14 +679,14 @@ def test_the_gate_notes_a_candidate_scored_against_another_floor(tmp_path):
     manifest.setdefault("extra", {})["not_collapsed_reference"] = "naive_score_time/19990101T000000"
     (directory / "manifest.json").write_text(json.dumps(manifest))
 
-    result = promotion_gate("cand", root=root)
+    result = promotion_gate("cand", root=root, parity_samples=0)
     assert any("19990101T000000" in note for note in result.notes)
 
 
 def test_the_gate_notes_a_candidate_that_recorded_no_reference(tmp_path):
     root = tmp_path / "models"
     _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.55))
-    result = promotion_gate("cand", root=root)
+    result = promotion_gate("cand", root=root, parity_samples=0)
     assert any("no not_collapsed_reference" in note for note in result.notes)
 
 
@@ -700,6 +700,6 @@ def test_a_trained_ensemble_can_be_gated(frames, stocked, tmp_path):
         val_slices=_slices(0.9, 0.3, not_collapsed=0.9),
     )
     _, result = _train(frames, stocked, tmp_path)
-    gate = promotion_gate("ensemble_test", result.version, root=stocked)
+    gate = promotion_gate("ensemble_test", result.version, root=stocked, parity_samples=0)
     assert gate.candidate_version == result.version
     assert gate.passed, gate_table(gate)

@@ -86,6 +86,39 @@ def test_predictions_are_probabilities(
     assert np.all((probs > 0.0) & (probs < 1.0))
 
 
+def test_a_prediction_does_not_depend_on_the_batch_it_was_scored_in(
+    fitted: XGBoostWinProb, xy: tuple[pl.DataFrame, np.ndarray]
+) -> None:
+    """One row at a time must equal the whole batch, row for row.
+
+    ``QuantileDMatrix`` derives its bin edges from the matrix it is handed, so
+    building one on the *prediction* path made every answer a function of the
+    batch it happened to be scored in. ``nfl predict`` scores a single snapshot:
+    every feature collapsed into one bin, the booster walked a near-fixed path,
+    and the served probability was a near-constant ~0.47 with correlation 0.014
+    to the same model's batch-scored output. This is the regression test that
+    was missing.
+    """
+    X = xy[0]
+    batch = fitted.predict_proba(X)
+    one_at_a_time = np.array([fitted.predict_proba(X[i : i + 1])[0] for i in range(0, X.height, 7)])
+    np.testing.assert_allclose(one_at_a_time, batch[::7], rtol=0, atol=1e-9)
+    assert batch.std() > 0.01, "a constant prediction would make this test vacuous"
+
+
+def test_contributions_add_up_to_the_prediction(
+    fitted: XGBoostWinProb, xy: tuple[pl.DataFrame, np.ndarray]
+) -> None:
+    """SHAP contributions explain the probability that was actually served."""
+    X = xy[0].head(32)
+    contribs = fitted.contributions(X)
+    assert contribs.shape == (X.height, len(fitted.encoding.columns) + 1)
+    logit = contribs.sum(axis=1)
+    np.testing.assert_allclose(
+        1.0 / (1.0 + np.exp(-logit)), fitted.predict_proba(X), rtol=0, atol=1e-5
+    )
+
+
 def test_predicting_before_fitting_is_an_error(xy: tuple[pl.DataFrame, np.ndarray]) -> None:
     with pytest.raises(RuntimeError, match="not fitted"):
         XGBoostWinProb().predict_proba(xy[0])

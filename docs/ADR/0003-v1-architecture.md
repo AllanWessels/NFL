@@ -52,3 +52,42 @@ game-constant columns — ~3.4k independent games masquerading as 622k rows.
   compressed prior shows lift.
 - TF on the RTX 5080 is practical (PTX JIT ≈ 24 s cold); XGBoost uses `grow_gpu_hist`.
 - Retraining is cheap (< 2 min end-to-end), so weekly in-season retrains are the default.
+
+## Amendment — serving parity (2026-08-23)
+
+The v1 line-up above was trained and measured entirely offline. Serving it exposed three ways the
+row `nfl predict` builds is not the row the model was trained on. All three are now closed, and
+item 1's feature set and item 5's gate are amended accordingly.
+
+1. **89 of the 245 in-play columns arrive null at serve time.** A `LiveSnapshot` carries a play's
+   type, yardage, scores and coarse turnover/penalty flags; it carries no EPA and no per-play
+   statistical detail, so every aggregate built on that detail is null on the serving path and
+   populated in training. This was known (`SNAPSHOT_UNKNOWABLE_COLUMNS`) and *not acted on*: the
+   models were trained on all 245. **The v1 feature set is now `servable` — in-play minus those
+   89, 156 columns** (`nfl.models.feature_sets.V1_FEATURE_SET`). The pre-game prior is dropped from
+   the default: two of its ten columns (`{home,away}_pl__qb1_adj_epa_per_dropback`) are rebuilt
+   from the snapshot's injury list rather than as of kickoff and disagreed on 134 of 134 sampled
+   snapshots. `servable_v1` (156 + the eight servable prior columns) was trained alongside and is
+   *worse* on all three val Q4 marks, so `servable` ships.
+2. **The GRU was served a one-play window.** `predict` built a single feature row, so the sequence
+   member windowed over one play — a different model from the 32-play one that was measured. The
+   serving path now builds the whole play history from the snapshot
+   (`ingame.snapshot_history_rows`) and reads the answer off the last row.
+3. **XGBoost re-quantised itself at inference.** `predict_proba` built a `QuantileDMatrix`, which
+   derives its bin edges from the batch it is handed. Scored one row at a time — which is what
+   `nfl predict` does — every feature collapsed into a single bin and the model emitted a
+   near-constant 0.47 (correlation **0.014** with its own batch-scored output; val log-loss 0.699,
+   worse than a coin flip). This, not a feature-distribution shift, was the BAL @ KC pathology:
+   the same snap scored 0.45 alone, 0.65 in its game and 0.82 in the season batch. The prediction
+   path now uses a plain `DMatrix`. No monotone constraint was added: with correct scoring the
+   model is already monotone in `score_diff` to within 0.05 over a ±21-point sweep.
+
+**Item 5 gains a third condition.** Every other number in the gate is measured offline, so on its
+own the gate promotes a model whose production behaviour is unmeasured. `nfl promote` now samples
+20 `(game, Q4 time)` snapshots from val, scores each through `predict_game` on the replay feed and
+through the offline dataset row for the same play, and requires
+**`|p_serving − p_offline| < 0.02`** on every one. Snapshots are taken at the sampled play's *own*
+clock: asking for a round `Q4 05:00` puts the snapshot ~11 s away from the snap the dataset row
+describes, and the measurement would be about that gap rather than about the pipeline.
+`--parity-samples 0` skips it, and then the table is a comparison of two artifacts rather than a
+promotion decision.

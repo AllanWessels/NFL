@@ -11,18 +11,24 @@ happened in 2016, because both feeds end at a
    is final and its play-by-play is on disk, ``espn`` otherwise.
 2. **Snapshot.** ``LiveFeed.snapshot(game_id, at)``. ``--at`` rewinds either
    feed to a game time; ``None`` means "whatever is happening now".
-3. **Features.** The in-play block comes from the snapshot —
-   :func:`nfl.features.ingame.snapshot_to_row` for ``ig__`` and the same
-   :func:`~nfl.features.baseline_inputs.build_baseline_inputs` expressions for
-   ``bi__`` — and the pre-game block (``ctx__``, ``tm__``, ``pl__``) is built
-   as of kickoff from ``data/raw`` and cached per game under
+3. **Features.** :func:`build_feature_rows` produces one row per play the
+   snapshot has seen, plus the snap itself. The in-play block comes from the
+   snapshot — :func:`nfl.features.ingame.snapshot_history_rows` for ``ig__`` and
+   the same :func:`~nfl.features.baseline_inputs.build_baseline_inputs`
+   expressions for ``bi__``, both over one synthetic play-by-play frame — and
+   the pre-game block (``ctx__``, ``tm__``, ``pl__``) is built as of kickoff
+   from ``data/raw`` and cached per game under
    ``data/cache/pregame/<game_id>.parquet``. Player availability is refreshed
    from the snapshot's injury list by
    :func:`~nfl.features.player.roster_from_snapshot`.
 4. **Model.** Whatever ``PRODUCTION.json`` points at, or ``name[:version]``.
-   The single-row frame is projected onto the manifest's feature list exactly:
-   a column the serving path cannot produce is *null and logged*, never
-   silently imputed and never quietly dropped.
+   The frame is projected onto the manifest's feature list exactly: a column the
+   serving path cannot produce is *null and logged*, never silently imputed and
+   never quietly dropped. A model that windows over play history — the GRU, or
+   an ensemble containing one — is handed the whole history and its answer read
+   off the last row; everything else is handed that row alone. Serving a
+   sequence model a single row would window it over one play, which is a
+   different model from the one the promotion gate measured.
 5. **Ledger.** One :func:`nfl.logging.ledger.append` call carrying the snapshot
    clock, the key game state, the feature hash, the git sha and the latency.
    Market fields stay null unless a Kalshi snapshot is attached best-effort —
@@ -45,7 +51,8 @@ import json
 import logging
 import math
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -77,14 +84,19 @@ __all__ = [
     "SnapshotSummary",
     "Source",
     "build_feature_row",
+    "build_feature_rows",
     "clock_sensitive_columns",
     "build_pregame_table",
     "check_parity",
     "load_model",
+    "needs_play_window",
     "pregame_cache_path",
     "predict_game",
     "render_prediction",
     "resolve_source",
+    "serving_meta",
+    "snapshot_to_baseline_row",
+    "snapshot_to_baseline_rows",
 ]
 
 Source = Literal["espn", "replay", "auto"]
@@ -401,92 +413,52 @@ def _snapshot(
 # Features: the in-play block
 # --------------------------------------------------------------------------- #
 
-#: The nflverse columns :func:`~nfl.features.baseline_inputs.build_baseline_inputs`
-#: reads, with the dtypes it expects. Building the frame explicitly (rather than
-#: letting polars infer from two rows) keeps an all-null column typed.
-_BASELINE_SCHEMA: dict[str, Any] = {
-    "game_id": pl.String,
-    "play_id": pl.Int64,
-    "home_team": pl.String,
-    "away_team": pl.String,
-    "posteam": pl.String,
-    "qtr": pl.Float64,
-    "quarter_seconds_remaining": pl.Float64,
-    "half_seconds_remaining": pl.Float64,
-    "game_seconds_remaining": pl.Float64,
-    "down": pl.Float64,
-    "ydstogo": pl.Float64,
-    "yardline_100": pl.Float64,
-    "goal_to_go": pl.Float64,
-    "total_home_score": pl.Float64,
-    "total_away_score": pl.Float64,
-    "home_timeouts_remaining": pl.Float64,
-    "away_timeouts_remaining": pl.Float64,
-}
 
+def snapshot_to_baseline_rows(snapshot: LiveSnapshot) -> list[dict[str, Any]]:
+    """The ``bi__`` block for every play the snapshot has seen, plus the snap.
 
-def _f(value: int | float | bool | None) -> float | None:
-    return None if value is None else float(value)
+    Same expressions as the offline builder, not a re-implementation, and over
+    the *same* synthetic play-by-play frame the ``ig__`` block is built from
+    (:func:`nfl.features.ingame.snapshot_play_frame`), so the two halves of a
+    serving row describe the same plays by construction.
+
+    Building the whole history rather than one row is also what makes the
+    builder's own lag correct: it recovers "score before this play" by lagging
+    nflverse's post-play totals one row (DATA_MODEL §2.2), and with real
+    predecessors present that lag is the real previous play instead of a
+    synthesised carrier row. A snapshot with **no** plays — a feed that
+    publishes a scoreboard and no play list — still gets that carrier row, or
+    the lag would report 0-0 for a game in progress.
+    """
+    from nfl.features.baseline_inputs import build_baseline_inputs
+    from nfl.features.ingame import snapshot_play_frame
+
+    frame = snapshot_play_frame(snapshot)
+    carried = frame.height == 1
+    if carried:
+        carrier = frame.head(1).with_columns(
+            pl.lit(0.0).alias("play_id"),
+            pl.lit(0.0).alias("order_sequence"),
+            pl.lit(float(snapshot.home_score)).alias("total_home_score"),
+            pl.lit(float(snapshot.away_score)).alias("total_away_score"),
+            *[
+                pl.lit(None, dtype=pl.Float64).alias(c)
+                for c in ("qtr", "quarter_seconds_remaining", "down", "ydstogo", "yardline_100")
+            ],
+            pl.lit(None, dtype=pl.String).alias("posteam"),
+        )
+        frame = pl.concat([carrier, frame])
+    built = build_baseline_inputs(frame)
+    rows = built.to_dicts()[1:] if carried else built.to_dicts()
+    for row in rows:
+        row.pop("game_id", None)
+        row.pop("play_id", None)
+    return rows
 
 
 def snapshot_to_baseline_row(snapshot: LiveSnapshot) -> dict[str, Any]:
-    """The ``bi__`` feature row for the snap a snapshot is poised at.
-
-    Same expressions as the offline builder, not a re-implementation: a two-row
-    play-by-play-like frame is pushed through
-    :func:`~nfl.features.baseline_inputs.build_baseline_inputs` and its last row
-    returned. The first row exists only to carry the pre-snap score, because the
-    builder recovers "score before this play" by lagging nflverse's post-play
-    totals one row (DATA_MODEL §2.2).
-    """
-    from nfl.features.baseline_inputs import build_baseline_inputs
-
-    home_score, away_score = float(snapshot.home_score), float(snapshot.away_score)
-    yardline = _f(snapshot.yards_to_endzone)
-    distance = _f(snapshot.distance)
-    goal_to_go: float | None = None
-    if yardline is not None and distance is not None:
-        goal_to_go = float(yardline <= distance)
-
-    carrier = {
-        "game_id": snapshot.game_id or "",
-        "play_id": 1,
-        "home_team": snapshot.home_team,
-        "away_team": snapshot.away_team,
-        "posteam": None,
-        "qtr": None,
-        "quarter_seconds_remaining": None,
-        "half_seconds_remaining": None,
-        "game_seconds_remaining": None,
-        "down": None,
-        "ydstogo": None,
-        "yardline_100": None,
-        "goal_to_go": None,
-        "total_home_score": home_score,
-        "total_away_score": away_score,
-        "home_timeouts_remaining": None,
-        "away_timeouts_remaining": None,
-    }
-    snap = {
-        **carrier,
-        "play_id": 2,
-        "posteam": snapshot.possession,
-        "qtr": float(snapshot.period),
-        "quarter_seconds_remaining": float(snapshot.clock_seconds),
-        "half_seconds_remaining": float(snapshot.half_seconds_remaining),
-        "game_seconds_remaining": float(snapshot.game_seconds_remaining),
-        "down": _f(snapshot.down),
-        "ydstogo": distance,
-        "yardline_100": yardline,
-        "goal_to_go": goal_to_go,
-        "home_timeouts_remaining": _f(snapshot.home_timeouts),
-        "away_timeouts_remaining": _f(snapshot.away_timeouts),
-    }
-    built = build_baseline_inputs(pl.DataFrame([carrier, snap], schema=_BASELINE_SCHEMA))
-    row = built.row(built.height - 1, named=True)
-    row.pop("game_id", None)
-    row.pop("play_id", None)
-    return row
+    """The ``bi__`` feature row for the snap a snapshot is poised at."""
+    return snapshot_to_baseline_rows(snapshot)[-1]
 
 
 # --------------------------------------------------------------------------- #
@@ -706,7 +678,7 @@ def _context_row(game_id: str, schedules: pl.DataFrame) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def build_feature_row(
+def build_feature_rows(
     snapshot: LiveSnapshot,
     *,
     game_id: str | None = None,
@@ -717,38 +689,59 @@ def build_feature_row(
     use_cache: bool = True,
     pregame: pl.DataFrame | None = None,
     wanted: Collection[str] | None = None,
-) -> dict[str, Any]:
-    """Every feature the serving path can produce for one snapshot.
+) -> list[dict[str, Any]]:
+    """Every feature the serving path can produce, **one row per play so far**.
 
-    Keys are the assembled dataset's column names — ``bi__``/``ig__`` from the
-    snapshot, ``ctx__`` from the schedule, ``home_tm__``/``away_tm__`` and
-    ``home_pl__``/``away_pl__`` from the pre-game table — so the result can be
-    projected onto any model's manifest without a translation layer.
+    The last element is the snap being predicted — that is
+    :func:`build_feature_row`. The rows before it are the same feature vector
+    computed for each play the snapshot has already seen, which is what a
+    sequence model needs: a GRU trained on a 32-play window and served a
+    one-row frame is windowing over a single play and is not the model that was
+    measured.
 
-    ``wanted`` is the model's feature list, when there is one. It is used only
-    to skip work: a model that asks for no pre-game column (the naive floor asks
-    for nine ``bi__`` columns and nothing else) does not pay for the team and
-    player builders. Pass ``None`` to build everything, which is what the parity
-    check does.
+    Producing the history costs nothing extra. ``snapshot_to_row`` already ran
+    :func:`~nfl.features.ingame.build_ingame` over the whole play list and threw
+    every row but the last away; both blocks now come off that one pass.
+
+    The ``bi__`` and ``ig__`` blocks vary per row and are exact for each play.
+    The ``ctx__``, ``tm__`` and ``pl__`` blocks are **game constants** — they
+    are computed as of kickoff and are the same for every play of the game — so
+    they are the same on every row by construction rather than by broadcast.
+    (``pl__`` carries one snapshot-time refresh from the injury list; that state
+    is attributed to the whole game, which is the one place a history row says
+    something the offline row for that play would not.)
     """
-    from nfl.features.ingame import snapshot_to_row
+    from nfl.features.ingame import snapshot_history_rows
     from nfl.features.player import roster_from_snapshot
 
     resolved = game_id or snapshot.game_id or ""
-    values: dict[str, Any] = {}
 
-    ingame_row = snapshot_to_row(snapshot)
-    ingame_row.pop("game_id", None)
-    ingame_row.pop("play_id", None)
-    values.update(ingame_row)
-    values.update(snapshot_to_baseline_row(snapshot))
+    ingame = snapshot_history_rows(snapshot)
+    baseline = snapshot_to_baseline_rows(snapshot)
+    if len(ingame) != len(baseline):  # pragma: no cover - both come off one frame
+        raise PredictionError(
+            f"serving history is inconsistent for {resolved}: {len(ingame)} in-game rows "
+            f"against {len(baseline)} baseline rows"
+        )
+    rows: list[dict[str, Any]] = []
+    for ig, bi in zip(ingame, baseline, strict=True):
+        values = dict(ig)
+        values.pop("game_id", None)
+        values.pop("play_id", None)
+        values.update(bi)
+        rows.append(values)
 
     schedule_frame = load_schedule_frame(schedules)
-    values.update(_context_row(resolved, schedule_frame))
+    context = _context_row(resolved, schedule_frame)
+
+    def finish(shared: Mapping[str, Any]) -> list[dict[str, Any]]:
+        for row in rows:
+            row.update(shared)
+        return rows
 
     if wanted is not None and not any(str(c).startswith(_PREGAME_PREFIXES) for c in wanted):
         log.debug("no pre-game column requested for %s; skipping the pre-game build", resolved)
-        return values
+        return finish(context)
 
     if pregame is None:
         pregame = build_pregame_table(
@@ -777,36 +770,81 @@ def build_feature_row(
     except (KeyError, ValueError) as exc:  # pragma: no cover - defensive
         log.warning("player block unavailable for %s: %s", resolved, exc)
 
-    values.update(_widen_pregame(pregame, snapshot.home_team, snapshot.away_team, prefix="tm__"))
-    values.update(_widen_pregame(player, snapshot.home_team, snapshot.away_team, prefix="pl__"))
-    return values
+    return finish(
+        {
+            **context,
+            **_widen_pregame(pregame, snapshot.home_team, snapshot.away_team, prefix="tm__"),
+            **_widen_pregame(player, snapshot.home_team, snapshot.away_team, prefix="pl__"),
+        }
+    )
+
+
+def build_feature_row(
+    snapshot: LiveSnapshot,
+    *,
+    game_id: str | None = None,
+    schedules: pl.DataFrame | str | Path | None = None,
+    pbp: pl.DataFrame | str | Path | None = None,
+    cache_root: Path | None = None,
+    refresh_pregame: bool = False,
+    use_cache: bool = True,
+    pregame: pl.DataFrame | None = None,
+    wanted: Collection[str] | None = None,
+) -> dict[str, Any]:
+    """Every feature the serving path can produce for one snapshot.
+
+    Keys are the assembled dataset's column names — ``bi__``/``ig__`` from the
+    snapshot, ``ctx__`` from the schedule, ``home_tm__``/``away_tm__`` and
+    ``home_pl__``/``away_pl__`` from the pre-game table — so the result can be
+    projected onto any model's manifest without a translation layer.
+
+    ``wanted`` is the model's feature list, when there is one. It is used only
+    to skip work: a model that asks for no pre-game column (the naive floor asks
+    for nine ``bi__`` columns and nothing else) does not pay for the team and
+    player builders. Pass ``None`` to build everything, which is what the parity
+    check does.
+
+    The last row of :func:`build_feature_rows` — same numbers, same cost.
+    """
+    return build_feature_rows(
+        snapshot,
+        game_id=game_id,
+        schedules=schedules,
+        pbp=pbp,
+        cache_root=cache_root,
+        refresh_pregame=refresh_pregame,
+        use_cache=use_cache,
+        pregame=pregame,
+        wanted=wanted,
+    )[-1]
 
 
 def _model_frame(
-    values: Mapping[str, Any], feature_names: Sequence[str]
+    rows: Mapping[str, Any] | Sequence[Mapping[str, Any]], feature_names: Sequence[str]
 ) -> tuple[pl.DataFrame, list[str]]:
-    """A one-row frame carrying exactly ``feature_names``, in order.
+    """A frame carrying exactly ``feature_names``, in order, one row per input.
 
     A name the serving path did not produce becomes a typed null column and is
     returned in the missing list, so the caller can log it. Silently dropping it
     would change the model's input width; imputing it would invent data.
     """
+    batch: Sequence[Mapping[str, Any]] = [rows] if isinstance(rows, Mapping) else list(rows)
     missing: list[str] = []
     data: dict[str, pl.Series] = {}
     for name in feature_names:
-        if name not in values:
+        if not any(name in row for row in batch):
             missing.append(name)
-            data[name] = pl.Series(name, [None], dtype=pl.Float64)
+            data[name] = pl.Series(name, [None] * len(batch), dtype=pl.Float64)
             continue
-        value = values[name]
-        if isinstance(value, str):
-            data[name] = pl.Series(name, [value], dtype=pl.String)
-        elif value is None:
-            data[name] = pl.Series(name, [None], dtype=pl.Float64)
-        elif isinstance(value, bool):
-            data[name] = pl.Series(name, [float(value)], dtype=pl.Float64)
+        values = [row.get(name) for row in batch]
+        if any(isinstance(v, str) for v in values):
+            data[name] = pl.Series(
+                name, [None if v is None else str(v) for v in values], dtype=pl.String
+            )
         else:
-            data[name] = pl.Series(name, [float(value)], dtype=pl.Float64)
+            data[name] = pl.Series(
+                name, [None if v is None else float(v) for v in values], dtype=pl.Float64
+            )
     return pl.DataFrame(data), missing
 
 
@@ -927,26 +965,87 @@ def _feature_names_for(model: Any, ref: ModelRef, values: Mapping[str, Any]) -> 
 # --------------------------------------------------------------------------- #
 
 
-def _predict_with_confidence(
-    model: Any, frame: pl.DataFrame
-) -> tuple[float, float, str, dict[str, float]]:
-    """``(p, confidence, method, components)`` from whatever surface the model has."""
-    if hasattr(model, "predict_with_confidence"):
-        probs, conf, parts = model.predict_with_confidence(frame)
-        components = {
-            str(k): float(np.asarray(v, dtype=float).ravel()[0]) for k, v in parts.items()
+def _accepts_meta(model: Any, method: str = "predict_proba") -> bool:
+    """Does ``model.method`` take a ``meta`` frame? — the sequence-model tell."""
+    import inspect
+
+    try:
+        return "meta" in inspect.signature(getattr(model, method)).parameters
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover - C callables
+        return False
+
+
+def needs_play_window(model: Any) -> bool:
+    """Whether anything inside ``model`` windows over play history.
+
+    A sequence model asks for ``meta`` so it can group and order plays by game.
+    Ask the model rather than the model's *name*: an ensemble is windowed when
+    any one of its members is, and which members it has is a fact about the
+    artifact.
+    """
+    members = getattr(model, "members", None)
+    if members:
+        return any(needs_play_window(getattr(m, "loaded", m)) for m in members)
+    return _accepts_meta(model)
+
+
+def serving_meta(game_id: str, n_rows: int) -> pl.DataFrame:
+    """The ``meta__`` frame that keys a serving history as one game, in order.
+
+    Every row is the same game and ``meta__play_id`` counts the plays, so a
+    window can neither reach into another game (there is no other game) nor read
+    a play out of order.
+    """
+    return pl.DataFrame(
+        {
+            "meta__game_id": pl.Series([game_id] * n_rows, dtype=pl.String),
+            "meta__play_id": pl.Series([float(i) for i in range(1, n_rows + 1)], dtype=pl.Float64),
         }
-        # Report the definition the ensemble actually chose, not a fixed label:
-        # the ledger's ``confidence_method`` is how a past prediction's number is
-        # interpreted, and "ensemble_spread" would be a lie for any other mode.
-        mode = str(getattr(model, "confidence_mode", "") or "ensemble_spread")
-        return (
-            float(np.asarray(probs, dtype=float).ravel()[0]),
-            float(np.asarray(conf, dtype=float).ravel()[0]),
-            mode,
-            components,
+    )
+
+
+@contextmanager
+def _windowed(model: Any, meta: pl.DataFrame | None) -> Iterator[Any]:
+    """Bind ``meta`` to an ensemble's registry members for the duration."""
+    if meta is None or not getattr(model, "members", None):
+        yield model
+        return
+    from nfl.models.train_ensemble import member_context
+
+    with member_context(model, meta) as bound:
+        yield bound
+
+
+def _predict_with_confidence(
+    model: Any, frame: pl.DataFrame, meta: pl.DataFrame | None = None
+) -> tuple[float, float, str, dict[str, float]]:
+    """``(p, confidence, method, components)`` from whatever surface the model has.
+
+    ``frame`` may be a whole game's play history; the answer is always the
+    **last** row, the snap being predicted. The earlier rows are there so a
+    sequence member sees the window it was trained with — see
+    :func:`build_feature_rows`.
+    """
+
+    def last(value: Any) -> float:
+        return float(np.asarray(value, dtype=float).ravel()[-1])
+
+    with _windowed(model, meta) as bound:
+        if hasattr(bound, "predict_with_confidence"):
+            probs, conf, parts = bound.predict_with_confidence(frame)
+            components = {str(k): last(v) for k, v in parts.items()}
+            # Report the definition the ensemble actually chose, not a fixed
+            # label: the ledger's ``confidence_method`` is how a past
+            # prediction's number is interpreted, and "ensemble_spread" would be
+            # a lie for any other mode.
+            mode = str(getattr(bound, "confidence_mode", "") or "ensemble_spread")
+            return last(probs), last(conf), mode, components
+        raw = (
+            bound.predict_proba(frame, meta)
+            if meta is not None and _accepts_meta(bound)
+            else bound.predict_proba(frame)
         )
-    p = float(np.asarray(model.predict_proba(frame), dtype=float).ravel()[0])
+    p = last(raw)
     # A single model cannot disagree with itself: distance from the coin flip is
     # the honest fallback, and it is exactly what the backtester reports.
     return p, min(1.0, abs(p - 0.5) * 2.0), "abs_margin", {"p_home": p}
@@ -1051,7 +1150,7 @@ def predict_game(
         resolved_source = "espn"
         snapshot = _snapshot(game_id, at_time, "espn", schedules=schedule_frame, pbp=pbp)
 
-    values = build_feature_row(
+    history = build_feature_rows(
         snapshot,
         game_id=game_id,
         schedules=schedule_frame,
@@ -1061,8 +1160,18 @@ def predict_game(
         use_cache=use_cache,
         wanted=ref.feature_names or None,
     )
+    values = history[-1]
     names = _feature_names_for(model_obj, ref, values)
-    frame, missing = _model_frame(values, names)
+
+    # A sequence member is fed the whole game so far and its answer is read off
+    # the last row; everything else is fed that row alone. Both produce the same
+    # prediction for a non-sequence model — this is a window, not a rescoring.
+    windowed = needs_play_window(model_obj)
+    batch = history if windowed else [values]
+    frame, missing = _model_frame(batch, names)
+    meta = serving_meta(game_id, len(batch)) if windowed else None
+    if windowed:
+        log.debug("windowing %s over %d plays of %s", ref, len(batch), game_id)
     if missing:
         log.warning(
             "%d of %d model input(s) not produced by the serving path; sent as null: %s",
@@ -1071,7 +1180,7 @@ def predict_game(
             ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""),
         )
 
-    p_home, confidence, method, components = _predict_with_confidence(model_obj, frame)
+    p_home, confidence, method, components = _predict_with_confidence(model_obj, frame, meta)
     if not math.isfinite(p_home):  # pragma: no cover - defensive
         raise PredictionError(f"{ref} returned a non-finite probability for {game_id}")
     p_home = float(min(max(p_home, 0.0), 1.0))
@@ -1409,6 +1518,28 @@ def render_prediction(result: PredictionResult, console: Any | None = None) -> N
         )
 
     parts: list[Any] = [state, Text(""), probabilities]
+
+    # An ensemble's answer is three answers and a calibrator. Printing only the
+    # blend hides which member moved it — and a member that has quietly gone
+    # flat (a GRU windowing over one play, a GBDT re-binning itself) looks
+    # exactly like a member that agrees with the others.
+    members = {
+        k.removeprefix("member__"): v
+        for k, v in result.components.items()
+        if k.startswith("member__")
+    }
+    if members:
+        breakdown = Table(box=None, pad_edge=False, show_header=True, header_style="dim")
+        breakdown.add_column("member", style="dim")
+        breakdown.add_column(f"P({snapshot.home_team})", justify="right")
+        breakdown.add_column("vs blend", justify="right")
+        for name, value in members.items():
+            breakdown.add_row(name, f"{value:.4f}", f"{value - result.p_home:+.4f}")
+        for label in ("raw", "calibrated"):
+            if label in result.components:
+                breakdown.add_row(f"[dim]{label}[/dim]", f"{result.components[label]:.4f}", "")
+        parts += [Text(""), breakdown]
+
     for warning in result.warnings:
         parts.append(Text(f"! {warning}", style="yellow"))
     if result.prediction_id:

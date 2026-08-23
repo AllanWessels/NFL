@@ -218,7 +218,7 @@ def test_promote_moves_the_pointer_when_the_gate_passes(gate_registry: Path) -> 
     import json
 
     _stock_gate_registry(gate_registry, candidate_log_loss=0.20)
-    result = invoke("promote", "--candidate", "cand")
+    result = invoke("promote", "--candidate", "cand", "--parity-samples", "0")
     assert result.exit_code == 0, result.output
     assert "promoted" in result.output
     pointer = json.loads((gate_registry / "PRODUCTION.json").read_text())
@@ -227,7 +227,7 @@ def test_promote_moves_the_pointer_when_the_gate_passes(gate_registry: Path) -> 
 
 def test_promote_refuses_and_shows_the_failing_numbers(gate_registry: Path) -> None:
     _stock_gate_registry(gate_registry, candidate_log_loss=0.40)
-    result = invoke("promote", "--candidate", "cand")
+    result = invoke("promote", "--candidate", "cand", "--parity-samples", "0")
     assert result.exit_code == 1
     assert "NOT promoted" in result.output
     assert "FAIL" in result.output
@@ -236,7 +236,7 @@ def test_promote_refuses_and_shows_the_failing_numbers(gate_registry: Path) -> N
 
 def test_promote_force_promotes_but_says_so_loudly(gate_registry: Path) -> None:
     _stock_gate_registry(gate_registry, candidate_log_loss=0.40)
-    result = invoke("promote", "--candidate", "cand", "--force")
+    result = invoke("promote", "--candidate", "cand", "--parity-samples", "0", "--force")
     assert result.exit_code == 0, result.output
     assert "FORCED PROMOTION" in result.output
     assert "worse than the naive floor" in result.output
@@ -245,7 +245,7 @@ def test_promote_force_promotes_but_says_so_loudly(gate_registry: Path) -> None:
 
 def test_promote_explains_a_candidate_that_is_not_in_the_registry(gate_registry: Path) -> None:
     _stock_gate_registry(gate_registry, candidate_log_loss=0.20)
-    result = invoke("promote", "--candidate", "nope")
+    result = invoke("promote", "--candidate", "nope", "--parity-samples", "0")
     assert result.exit_code == 1
     assert "cannot evaluate the promotion gate" in result.output
 
