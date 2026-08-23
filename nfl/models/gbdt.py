@@ -242,7 +242,22 @@ class XGBoostWinProb:
         *,
         ref: Any = None,
         weight: np.ndarray | None = None,
+        quantised: bool = True,
     ) -> Any:
+        """A DMatrix for ``X``. ``quantised=False`` for anything being *scored*.
+
+        ``QuantileDMatrix`` derives its ``max_bin`` cut points from the matrix it
+        is handed unless it is given a ``ref``. That is what you want when
+        building the training matrix, and catastrophic on the prediction path:
+        the bins — and therefore the answer — come from *whatever batch the row
+        was scored in*. Measured on this model, one row at a time (which is what
+        ``nfl predict`` does) collapsed every feature into a single bin and
+        produced a near-constant 0.47 with correlation **0.014** to the same
+        model's batch-scored output, and a val log-loss of 0.699 — worse than a
+        coin flip. The same snap scored in its game came out 0.65 and in the
+        season batch 0.82. A plain ``DMatrix`` bins nothing and is batch-size
+        independent, which is the only acceptable behaviour for a served model.
+        """
         import xgboost as xgb
 
         matrix = self.encoding.matrix(X)
@@ -261,6 +276,8 @@ class XGBoostWinProb:
             kwargs["label"] = np.asarray(y, dtype=np.float32)
         if weight is not None:
             kwargs["weight"] = np.asarray(weight, dtype=np.float32)
+        if not quantised:
+            return xgb.DMatrix(matrix, **kwargs)
         if ref is not None:
             return xgb.QuantileDMatrix(matrix, ref=ref, **kwargs)
         return xgb.QuantileDMatrix(matrix, **kwargs)
@@ -403,9 +420,25 @@ class XGBoostWinProb:
         if self.booster is None:
             raise RuntimeError(f"{self.name} is not fitted")
         assert_model_input_frame(X, context=f"{self.name}.predict_proba")
-        dmat = self._dmatrix(X)
+        dmat = self._dmatrix(X, quantised=False)
         out: np.ndarray = self.booster.predict(dmat, iteration_range=(0, self.best_iteration + 1))
         return out.astype(np.float64)
+
+    def contributions(self, X: pl.DataFrame) -> np.ndarray:
+        """Per-feature SHAP contributions, ``(n_rows, n_features + 1)``.
+
+        The last column is the bias. Same unquantised matrix
+        :meth:`predict_proba` uses, so an explanation describes the prediction
+        that was actually served.
+        """
+        if self.booster is None:
+            raise RuntimeError(f"{self.name} is not fitted")
+        assert_model_input_frame(X, context=f"{self.name}.contributions")
+        dmat = self._dmatrix(X, quantised=False)
+        out = self.booster.predict(
+            dmat, iteration_range=(0, self.best_iteration + 1), pred_contribs=True
+        )
+        return np.asarray(out, dtype=np.float64)
 
     # -- interpretation ---------------------------------------------------- #
 

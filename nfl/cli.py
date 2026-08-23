@@ -426,6 +426,25 @@ def promote(
         str | None, typer.Option("--floor-version", help="Floor version; default is latest.")
     ] = None,
     stage: Annotated[str, typer.Option("--stage", help="Stage pointer to move.")] = "production",
+    parity_samples: Annotated[
+        int | None,
+        typer.Option(
+            "--parity-samples",
+            help=(
+                "Val snapshots scored down both the serving and the offline path "
+                "(default 20). 0 skips the serving-parity condition, which makes the "
+                "rest of the table a comparison of artifacts rather than a promotion "
+                "decision."
+            ),
+        ),
+    ] = None,
+    parity_tolerance: Annotated[
+        float | None,
+        typer.Option(
+            "--parity-tolerance",
+            help="Largest |p_serving - p_offline| allowed (default 0.02).",
+        ),
+    ] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Promote even if the gate fails. Says so, loudly.")
     ] = False,
@@ -433,18 +452,33 @@ def promote(
     """Promote a model to PRODUCTION if it clears the ADR 0003 §5 gate.
 
     The candidate must beat the floor on val Q4@600/300/120 for **both**
-    log-loss and Brier, and be no worse on the not-collapsed subset. The
-    comparison table prints either way — a refused promotion should say exactly
-    which number refused it.
+    log-loss and Brier, be no worse on the not-collapsed subset, and **serve
+    what it scored**: ``--parity-samples`` snapshots are run through
+    ``nfl predict`` and compared against the offline dataset row for the same
+    play. The comparison table prints either way — a refused promotion should
+    say exactly which number refused it.
     """
     from rich.table import Table
 
     from nfl.models import registry
-    from nfl.models.train_ensemble import gate_table, promotion_gate
+    from nfl.models.train_ensemble import (
+        SERVING_PARITY_SAMPLES,
+        SERVING_PARITY_TOLERANCE,
+        gate_table,
+        promotion_gate,
+    )
 
     try:
         result = promotion_gate(
-            candidate, version, floor=floor, floor_version=floor_version, root=None
+            candidate,
+            version,
+            floor=floor,
+            floor_version=floor_version,
+            root=None,
+            parity_samples=SERVING_PARITY_SAMPLES if parity_samples is None else parity_samples,
+            parity_tolerance=(
+                SERVING_PARITY_TOLERANCE if parity_tolerance is None else parity_tolerance
+            ),
         )
     except (FileNotFoundError, KeyError, ValueError) as exc:
         console.print(f"[red]cannot evaluate the promotion gate[/red]: {exc}")
@@ -475,6 +509,31 @@ def promote(
             f"[green]{verdict}[/green]" if verdict == "pass" else f"[red]{verdict}[/red]",
         )
     console.print(table)
+
+    if result.serving_parity is not None and result.serving_parity.samples:
+        parity = result.serving_parity
+        detail = Table(
+            title=(
+                f"serving parity — |p_serving - p_offline|, tolerance {parity.tolerance:g} "
+                f"(worst {parity.worst:.4f}, mean {parity.mean:.4f})"
+            )
+        )
+        for header in ("game", "at", "play", "serving", "offline", "delta", "verdict"):
+            detail.add_column(
+                header, justify="right" if header not in {"game", "at", "verdict"} else "left"
+            )
+        for row in parity.table().iter_rows(named=True):
+            verdict = row["verdict"]
+            detail.add_row(
+                row["game_id"],
+                row["at"],
+                str(row["play_index"]),
+                f"{row['p_serving']:.4f}",
+                f"{row['p_offline']:.4f}",
+                f"{row['delta']:.4f}",
+                f"[green]{verdict}[/green]" if verdict == "pass" else f"[red]{verdict}[/red]",
+            )
+        console.print(detail)
 
     if not result.passed and not force:
         console.print(

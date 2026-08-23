@@ -56,6 +56,7 @@ uv run nfl evaluate --season 2024
 
 uv run nfl promote --candidate ensemble_v1 # gate, then move the PRODUCTION pointer
 uv run nfl promote --candidate ensemble_v1 --version 20260823T061500
+uv run nfl promote --candidate ensemble_v1 --parity-samples 0   # offline slices only
 uv run nfl promote --candidate ensemble_v1 --floor naive_score_time --force
 ```
 
@@ -74,6 +75,14 @@ measured rather than re-deriving them from a dataset that may have moved.
 The not-collapsed subset is keyed on the **floor's** probability band `[0.15, 0.85]`
 so both sides are scored on the same rows; the per-model variant is reported
 alongside as `not_collapsed_own` and is never gated.
+
+The gate's third condition is **serving parity**: 20 `(game, Q4 time)` snapshots
+from val are scored through `nfl predict` on the replay feed *and* through the
+offline dataset row for the same play, and every one must land within `0.02`.
+Every other number in the table is an offline measurement — without this one the
+gate can promote a model whose production behaviour was never checked, which is
+exactly how a GRU served a one-play window and a GBDT served a constant 0.47 got
+past it. See ADR 0003's serving-parity amendment. `--parity-samples 0` skips it.
 
 On a pass it writes **`data/models/PRODUCTION.json`** — a pointer holding the
 `name`/`version`, the promotion timestamp, the git sha, the artifact's metrics

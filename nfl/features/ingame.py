@@ -67,6 +67,8 @@ __all__ = [
     "SNAPSHOT_UNKNOWABLE_COLUMNS",
     "build_ingame",
     "load_pbp_frame",
+    "snapshot_history_rows",
+    "snapshot_play_frame",
     "snapshot_to_row",
 ]
 
@@ -1254,6 +1256,12 @@ _SNAPSHOT_SCHEMA: dict[str, pl.DataType | type[pl.DataType]] = {
     "penalty": pl.Float64,
     "is_turnover": pl.Float64,
     "fixed_drive": pl.Float64,
+    # Not read by :func:`build_ingame` (``_prepare`` derives its own), but
+    # :func:`nfl.features.baseline_inputs.build_baseline_inputs` reads all three
+    # by name and the serving path pushes *this* frame through both builders.
+    "half_seconds_remaining": pl.Float64,
+    "game_seconds_remaining": pl.Float64,
+    "goal_to_go": pl.Float64,
 }
 
 
@@ -1296,35 +1304,53 @@ def _drive_continues(snapshot: LiveSnapshot) -> bool:
     return last.scoring_play and _normalise_play_type(last.play_type) in ("pass", "run")
 
 
-def snapshot_to_row(snapshot: LiveSnapshot) -> dict[str, Any]:
-    """The ``ig__`` feature row for the snap a :class:`LiveSnapshot` is poised at.
+def snapshot_play_frame(snapshot: LiveSnapshot) -> pl.DataFrame:
+    """A play-by-play-like frame for everything a snapshot has seen, plus the snap.
 
-    Same columns as :func:`build_ingame`, produced by the same expressions: the
-    snapshot's plays are reshaped into a play-by-play-like frame, one synthetic
-    row is appended for the upcoming snap, and the last row of the result is
-    returned. Columns in :data:`SNAPSHOT_UNKNOWABLE_COLUMNS` are ``None``.
+    One row per play already run, in order, then one synthetic row for the snap
+    the snapshot is poised at. This is the single source both serving builders
+    read: :func:`build_ingame` for the ``ig__`` block and
+    :func:`~nfl.features.baseline_inputs.build_baseline_inputs` for ``bi__``, so
+    the two sides of a serving row cannot drift apart the way two hand-written
+    reshapes would.
 
-    Two honest differences from the play-by-play row for the same snap:
-
-    * **Clock.** A truncated snapshot reports the time that was *asked for*
-      (``Q4 05:00``), not the game clock of the next snap (``4:58``). The
-      seconds-remaining features differ by that gap; every flag derived from
-      them is unaffected unless the gap straddles a threshold.
-    * **Timeouts.** ``HistoricalReplayFeed`` carries per-play timeouts, so they
-      are exact. ESPN publishes timeouts only for "now"; a truncated ESPN
-      snapshot sets ``timeouts_exact=False`` and the timeout features are then
-      the feed's current values, not the values at ``at``.
+    The synthetic row's *outcome* columns are null — nothing has happened yet —
+    while its pre-snap situation is what the model is asked to predict from.
     """
+    from nfl.data.live.base import game_seconds_remaining, half_seconds_remaining
+
     home, away = snapshot.home_team, snapshot.away_team
 
     def other(team: str | None) -> str | None:
         return None if team is None else (away if team == home else home)
+
+    def clocks(period: int, quarter_seconds: int | None) -> tuple[float | None, float | None]:
+        """``(half, game)`` seconds remaining, or ``(None, None)`` with no clock."""
+        if quarter_seconds is None:
+            return None, None
+        return (
+            float(half_seconds_remaining(int(period), int(quarter_seconds))),
+            float(game_seconds_remaining(int(period), int(quarter_seconds))),
+        )
+
+    def goal_to_go(ydstogo: float | None, yardline: float | None) -> float:
+        """nflverse's flag, derived. ``0`` when the row is not a snap at all.
+
+        ``_prepare`` derives the ``ig__`` side the same way. nflverse writes
+        ``0`` rather than null on administrative rows (a timeout has no yard
+        line), so an unknown situation is ``0`` here too — returning null there
+        was the one ``bi__`` column the two paths disagreed on.
+        """
+        if ydstogo is None or yardline is None:
+            return 0.0
+        return float(ydstogo >= yardline)
 
     rows: list[dict[str, Any]] = []
     for order, (drive, play) in enumerate(
         ((d, p) for d in snapshot.drives for p in d.plays), start=1
     ):
         play_type = _normalise_play_type(play.play_type)
+        play_half, play_game = clocks(play.period, play.clock_seconds)
         rows.append(
             {
                 "game_id": snapshot.game_id or "",
@@ -1351,6 +1377,12 @@ def snapshot_to_row(snapshot: LiveSnapshot) -> dict[str, Any]:
                 "penalty": float(play.is_penalty),
                 "is_turnover": float(play.is_turnover),
                 "fixed_drive": _maybe_float(drive.drive_number),
+                "half_seconds_remaining": play_half,
+                "game_seconds_remaining": play_game,
+                "goal_to_go": goal_to_go(
+                    _maybe_float(play.start_distance),
+                    _maybe_float(play.start_yards_to_endzone),
+                ),
             }
         )
 
@@ -1388,15 +1420,59 @@ def snapshot_to_row(snapshot: LiveSnapshot) -> dict[str, Any]:
             "penalty": 0.0,
             "is_turnover": 0.0,
             "fixed_drive": drive_number,
+            "half_seconds_remaining": float(snapshot.half_seconds_remaining),
+            "game_seconds_remaining": float(snapshot.game_seconds_remaining),
+            "goal_to_go": goal_to_go(
+                _maybe_float(snapshot.distance), _maybe_float(snapshot.yards_to_endzone)
+            ),
         }
     )
+    return pl.DataFrame(rows, schema=_SNAPSHOT_SCHEMA)
 
-    built = build_ingame(pl.DataFrame(rows, schema=_SNAPSHOT_SCHEMA))
-    row = built.row(built.height - 1, named=True)
-    row["play_id"] = None
-    for column in SNAPSHOT_UNKNOWABLE_COLUMNS:
-        row[column] = None
-    return row
+
+def snapshot_history_rows(snapshot: LiveSnapshot) -> list[dict[str, Any]]:
+    """The ``ig__`` block for **every** play the snapshot has seen, plus the snap.
+
+    Same columns and same expressions as :func:`build_ingame` — one call, over
+    :func:`snapshot_play_frame`, so the running aggregates accumulate exactly as
+    they do offline. The last element is :func:`snapshot_to_row`; the ones
+    before it are the play history a sequence model windows over.
+
+    Without this, ``nfl predict`` built a single row and the GRU saw a window of
+    length one: a model trained on 32 plays of context served on 1, which is a
+    different model. Columns in :data:`SNAPSHOT_UNKNOWABLE_COLUMNS` are ``None``
+    on every row, as they are for the snap itself.
+    """
+    built = build_ingame(snapshot_play_frame(snapshot))
+    rows = built.to_dicts()
+    for row in rows:
+        row["play_id"] = None
+        for column in SNAPSHOT_UNKNOWABLE_COLUMNS:
+            row[column] = None
+    return rows
+
+
+def snapshot_to_row(snapshot: LiveSnapshot) -> dict[str, Any]:
+    """The ``ig__`` feature row for the snap a :class:`LiveSnapshot` is poised at.
+
+    The last row of :func:`snapshot_history_rows`: same columns as
+    :func:`build_ingame`, produced by the same expressions, with the columns in
+    :data:`SNAPSHOT_UNKNOWABLE_COLUMNS` set to ``None``.
+
+    Two honest differences from the play-by-play row for the same snap:
+
+    * **Clock.** A truncated snapshot reports the time that was *asked for*
+      (``Q4 05:00``), not the game clock of the next snap (``4:58``). The
+      seconds-remaining features differ by that gap; every flag derived from
+      them is unaffected unless the gap straddles a threshold. Ask for the
+      snap's own clock and the gap — and every difference it causes — is zero;
+      that is how the serving-parity gate samples.
+    * **Timeouts.** ``HistoricalReplayFeed`` carries per-play timeouts, so they
+      are exact. ESPN publishes timeouts only for "now"; a truncated ESPN
+      snapshot sets ``timeouts_exact=False`` and the timeout features are then
+      the feed's current values, not the values at ``at``.
+    """
+    return snapshot_history_rows(snapshot)[-1]
 
 
 # --------------------------------------------------------------------------- #
