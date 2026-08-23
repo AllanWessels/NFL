@@ -52,6 +52,8 @@ uv run pre-commit install      # enable git hooks once per clone
 uv run nfl ingest nflverse --seasons 2010-2025 [--tables pbp,schedules] [--force]
 uv run nfl train --model baseline          # naive | xgb | mlp | seq | ensemble
 uv run nfl predict 2024_18_KC_DEN --at "Q4 05:00"
+uv run nfl predict "DAL@PHI" --season 2025 --week 1   # matchup / team / ticker / espn id
+uv run nfl predict Eagles                              # that team's game this week
 uv run nfl evaluate --season 2024
 
 uv run nfl promote --candidate ensemble_v1 # gate, then move the PRODUCTION pointer
@@ -60,7 +62,10 @@ uv run nfl promote --candidate ensemble_v1 --parity-samples 0   # offline slices
 uv run nfl promote --candidate ensemble_v1 --floor naive_score_time --force
 ```
 
-Slash command: `/predict <game_id> [--at "Q4 05:00"]` wraps `uv run nfl predict`.
+Slash command: `/predict <game> [--at "Q4 05:00"]` wraps `uv run nfl predict`. `<game>`
+accepts an nflverse id, a matchup (`DAL@PHI`, `PHI vs DAL`), a single team
+(`PHI`, `Eagles`, `Philadelphia`), a Kalshi ticker or an ESPN event id — see
+`nfl/inference/resolve.py`.
 
 ### Promotion and the production pointer
 

@@ -71,6 +71,7 @@ def test_predict_passes_its_arguments_through(monkeypatch: pytest.MonkeyPatch) -
     ``tests/test_inference_predict.py``.
     """
     from nfl.inference.predict import PredictionError
+    from nfl.inference.resolve import GameRef
 
     seen: dict[str, object] = {}
 
@@ -79,6 +80,22 @@ def test_predict_passes_its_arguments_through(monkeypatch: pytest.MonkeyPatch) -
         seen.update(kwargs)
         raise PredictionError("stopped before touching any data")
 
+    def fake_resolve(spec: str, **_: object) -> GameRef:
+        """The spec resolver has its own suite; keep this test off the schedules."""
+        return GameRef(
+            game_id=spec,
+            season=2024,
+            week=18,
+            game_type="REG",
+            away_team="KC",
+            home_team="DEN",
+            kickoff=None,
+            espn=None,
+            spec=spec,
+            how="game_id",
+        )
+
+    monkeypatch.setattr("nfl.inference.resolve.resolve_game", fake_resolve)
     monkeypatch.setattr("nfl.inference.predict.predict_game", fake_predict)
     result = runner.invoke(
         app, ["predict", "2024_18_KC_DEN", "--at", "Q4 05:00", "--source", "replay", "--no-ledger"]
