@@ -60,6 +60,14 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "nfl/data/schemas.py" = ["N815"]
+# The model contract is reproduced verbatim across agents/branches; it is a
+# specification, not hand-formatted source. `X` / `X_val` are part of that
+# contract and reappear in every model implementation.
+"nfl/models/base.py" = ["I001", "N803", "UP037"]
+
+[tool.ruff.format]
+# Same reason: `ruff format .` must not rewrite the verbatim contract file.
+exclude = ["nfl/models/base.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
