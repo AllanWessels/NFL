@@ -13,6 +13,7 @@ from nfl.features.assemble import LABEL_COLUMN
 from nfl.models.artifacts import read_manifest
 from nfl.models.base import FitResult, WinProbModel
 from nfl.models.data import design_matrix, labels, load_model_frames
+from nfl.models.feature_sets import feature_set_columns
 from nfl.models.gbdt import (
     MAX_CATEGORY_CARDINALITY,
     XGBoostWinProb,
@@ -338,3 +339,69 @@ def test_stride_thins_the_training_frame_only(tmp_path: Path) -> None:
     assert thinned.train.height == len(range(0, whole.train.height, 3))
     assert thinned.val.height == whole.val.height
     assert thinned.test.height == whole.test.height
+
+
+# --------------------------------------------------------------------------- #
+# ADR 0003: game-aware training
+# --------------------------------------------------------------------------- #
+
+
+def test_train_xgboost_v1_records_the_feature_set_and_q4_selection(tmp_path: Path) -> None:
+    """The v1 configuration: narrowed features, game weights, Q4 early stopping."""
+    processed = tmp_path / "processed"
+    write_tiny_dataset(processed)
+    models_root = tmp_path / "models"
+
+    model, result = train_xgboost(
+        root=processed,
+        models_root=models_root,
+        device="cpu",
+        num_boost_round=20,
+        early_stopping_rounds=5,
+        params=THREADS,
+        top_k_importance=10,
+        feature_set="v1",
+        weight_by_game=True,
+        selection_metric="q4",
+    )
+
+    frames = load_model_frames(root=processed)
+    expected = feature_set_columns(frames.train, "v1")
+    # The encoding may drop a high-cardinality string column, so the fitted
+    # columns are a subset of the feature set, never a superset of it.
+    assert set(model.encoding.columns) <= set(expected)
+    assert len(model.encoding.columns) < len(feature_set_columns(frames.train, "full"))
+
+    manifest = read_manifest(models_root / model.name / result.version)
+    assert manifest["feature_set"] == "v1"
+    assert manifest["selection_metric"] == "q4"
+    assert manifest["weight_by_game"] is True
+    assert manifest["val_q4_selection_log_loss"] > 0
+
+    # The weighted train matrix carries one unit of evidence per game.
+    n_games = frames.train.get_column("meta__game_id").n_unique()
+    assert result.extra["effective_train_weight"] == pytest.approx(n_games)
+    # Early stopping watched the Q4 eval set, so it is in the history.
+    assert "val_q4" in result.extra["eval_history"]
+
+
+def test_q4_selection_metric_without_a_selection_raises(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    write_tiny_dataset(processed)
+    frames = load_model_frames(root=processed)
+    X, y = frames.as_xy("train")
+    Xv, yv = frames.as_xy("val")
+    model = XGBoostWinProb(
+        device="cpu", num_boost_round=5, early_stopping_rounds=2, selection_metric="q4"
+    )
+    with pytest.raises(ValueError, match="needs a validation set"):
+        model.fit(X, y, Xv, yv)
+
+
+def test_sample_weight_length_is_checked(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    write_tiny_dataset(processed)
+    X, y = load_model_frames(root=processed).as_xy("train")
+    model = XGBoostWinProb(device="cpu", num_boost_round=3)
+    with pytest.raises(ValueError, match="sample_weight has"):
+        model.fit(X, y, sample_weight=np.ones(3))
