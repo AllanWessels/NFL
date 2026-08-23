@@ -1755,3 +1755,7 @@ def build_team_features(
     ).sort(["game_id", "team"])
     assert_no_market_columns(out, context="nfl.features.team")
     return out
+
+
+#: Registry entry point (``nfl.features.registry`` discovers ``build_team``).
+build_team = build_team_features
