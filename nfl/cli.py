@@ -277,7 +277,7 @@ TRAINERS: dict[str, tuple[str, str]] = {
     "xgb": ("nfl.models.gbdt", "train_gbdt"),
     "mlp": ("nfl.models.tf_mlp", "train_mlp"),
     "seq": ("nfl.models.tf_seq", "train_seq"),
-    "ensemble": ("nfl.models.ensemble", "train_ensemble"),
+    "ensemble": ("nfl.models.train_ensemble", "train_ensemble"),
 }
 
 #: Older spellings kept working so existing scripts and docs do not break.
@@ -338,11 +338,26 @@ def train(
         int, typer.Option("--train-through", help="Last season included in training.")
     ] = 2022,
     val_season: Annotated[int, typer.Option("--val-season", help="Validation season.")] = 2023,
+    members: Annotated[
+        str | None,
+        typer.Option(
+            "--members",
+            help="Ensemble only: comma-separated member names; default is the ADR 0003 three.",
+        ),
+    ] = None,
+    meta: Annotated[
+        str | None,
+        typer.Option("--meta", help="Ensemble only: logit_mean | mean | logistic_stacker."),
+    ] = None,
 ) -> None:
     """Train a model on season-based splits and write it to ``data/models/``.
 
     Each model lives in its own module and is imported only when selected, so
     the GBDT path never pays for TensorFlow's import and vice versa.
+
+    ``--model ensemble`` does not train anything itself: it loads the latest
+    registry artifact of each member, fits the meta-learner and the phase-aware
+    calibrator on val, and writes the blended model back to the registry.
     """
     import inspect
 
@@ -354,6 +369,8 @@ def train(
         "seasons": season_list,
         "train_through": train_through,
         "val_season": val_season,
+        "members": [m.strip() for m in members.split(",") if m.strip()] if members else None,
+        "meta": meta,
     }
     # Sibling trainers are plain functions with varying signatures; pass only
     # what each one actually accepts rather than assuming a common shape.
@@ -372,6 +389,9 @@ def _render_fit_result(result: object, key: str) -> None:
     """Print whatever the trainer returned; a ``FitResult`` gets a metrics table."""
     from rich.table import Table
 
+    # Trainers return either a bare ``FitResult`` or ``(model, FitResult)``.
+    if isinstance(result, tuple) and len(result) == 2 and hasattr(result[1], "metrics"):
+        result = result[1]
     name = getattr(result, "model_name", key)
     version = getattr(result, "version", None)
     if version is None:
@@ -386,6 +406,93 @@ def _render_fit_result(result: object, key: str) -> None:
         for metric, value in metrics.items():
             table.add_row(str(metric), f"{value:.6f}" if isinstance(value, float) else str(value))
         console.print(table)
+
+
+@app.command()
+def promote(
+    candidate: Annotated[
+        str, typer.Option("--candidate", help="Model name to promote, e.g. 'ensemble_v1'.")
+    ],
+    version: Annotated[
+        str | None, typer.Option("--version", help="Candidate version; default is latest.")
+    ] = None,
+    floor: Annotated[
+        str, typer.Option("--floor", help="Model the candidate must beat (ADR 0003 §5).")
+    ] = "naive_score_time",
+    floor_version: Annotated[
+        str | None, typer.Option("--floor-version", help="Floor version; default is latest.")
+    ] = None,
+    stage: Annotated[str, typer.Option("--stage", help="Stage pointer to move.")] = "production",
+    force: Annotated[
+        bool, typer.Option("--force", help="Promote even if the gate fails. Says so, loudly.")
+    ] = False,
+) -> None:
+    """Promote a model to PRODUCTION if it clears the ADR 0003 §5 gate.
+
+    The candidate must beat the floor on val Q4@600/300/120 for **both**
+    log-loss and Brier, and be no worse on the not-collapsed subset. The
+    comparison table prints either way — a refused promotion should say exactly
+    which number refused it.
+    """
+    from rich.table import Table
+
+    from nfl.models import registry
+    from nfl.models.train_ensemble import gate_table, promotion_gate
+
+    try:
+        result = promotion_gate(
+            candidate, version, floor=floor, floor_version=floor_version, root=None
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        console.print(f"[red]cannot evaluate the promotion gate[/red]: {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(
+        f"[bold]promotion gate[/bold] candidate="
+        f"[cyan]{result.candidate}[/cyan]/[dim]{result.candidate_version}[/dim] "
+        f"floor=[cyan]{result.floor}[/cyan]/[dim]{result.floor_version}[/dim]"
+    )
+    for note in result.notes:
+        console.print(f"  [yellow]{note}[/yellow]")
+
+    table = Table(title="val slices — lower is better")
+    for header in ("slice", "metric", "candidate", "floor", "delta", "rule", "verdict"):
+        table.add_column(
+            header, justify="right" if header in {"candidate", "floor", "delta"} else "left"
+        )
+    for row in gate_table(result).iter_rows(named=True):
+        verdict = row["verdict"]
+        table.add_row(
+            row["slice"],
+            row["metric"],
+            f"{row['candidate']:.6f}",
+            f"{row['floor']:.6f}",
+            f"{row['delta']:+.6f}",
+            row["rule"],
+            f"[green]{verdict}[/green]" if verdict == "pass" else f"[red]{verdict}[/red]",
+        )
+    console.print(table)
+
+    if not result.passed and not force:
+        console.print(
+            f"[red]NOT promoted[/red]: {result.candidate}/{result.candidate_version} does not "
+            f"clear the floor. Retrain, or re-run with --force if you know why."
+        )
+        raise typer.Exit(1)
+
+    if not result.passed:
+        console.print(
+            "[bold red]!! FORCED PROMOTION !!"
+            "[/bold red] the gate FAILED and --force overrode it.\n"
+            "[bold red]   This model is going to PRODUCTION worse than the naive floor "
+            "on the slices the project is judged on (ADR 0003 §5).[/bold red]"
+        )
+
+    pointer = registry.promote(result.candidate, result.candidate_version, stage)
+    console.print(
+        f"[green]promoted[/green] {result.candidate}/{result.candidate_version} "
+        f"to {stage.upper()} -> {pointer}"
+    )
 
 
 @app.command()
