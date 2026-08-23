@@ -63,7 +63,33 @@ def test_predict_requires_game_id() -> None:
     assert result.exit_code != 0
 
 
-def test_predict_accepts_game_id_and_at() -> None:
-    result = runner.invoke(app, ["predict", "2024_18_KC_DEN", "--at", "Q4 05:00"])
-    assert result.exit_code == 0
-    assert "2024_18_KC_DEN" in result.output
+def test_predict_passes_its_arguments_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI is a thin shell over :func:`nfl.inference.predict.predict_game`.
+
+    The entrypoint is stubbed rather than run: this file is the surface smoke
+    test, and the real pipeline is exercised offline in
+    ``tests/test_inference_predict.py``.
+    """
+    from nfl.inference.predict import PredictionError
+
+    seen: dict[str, object] = {}
+
+    def fake_predict(game_id: str, **kwargs: object) -> None:
+        seen["game_id"] = game_id
+        seen.update(kwargs)
+        raise PredictionError("stopped before touching any data")
+
+    monkeypatch.setattr("nfl.inference.predict.predict_game", fake_predict)
+    result = runner.invoke(
+        app, ["predict", "2024_18_KC_DEN", "--at", "Q4 05:00", "--source", "replay", "--no-ledger"]
+    )
+
+    assert result.exit_code == 1
+    assert "stopped before touching any data" in result.output
+    assert seen == {
+        "game_id": "2024_18_KC_DEN",
+        "at": "Q4 05:00",
+        "source": "replay",
+        "model": "production",
+        "write_ledger": False,
+    }
