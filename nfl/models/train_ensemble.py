@@ -94,6 +94,7 @@ __all__ = [
     "load_member",
     "member_context",
     "promotion_gate",
+    "split_member_spec",
     "train_ensemble",
 ]
 
@@ -462,6 +463,18 @@ def member_context(ensemble: StackedEnsemble, meta: pl.DataFrame) -> Iterator[St
             m.context = None
 
 
+def split_member_spec(spec: str) -> tuple[str, str | None]:
+    """``"xgboost_winprob:20260823T052439"`` -> ``("xgboost_winprob", "2026...")``.
+
+    Pinning by version is the difference between "the ensemble that was
+    evaluated" and "whatever the registry happened to hold that afternoon".
+    Registry names never contain a colon and versions are timestamps, so the
+    split is unambiguous.
+    """
+    name, sep, version = str(spec).partition(":")
+    return name.strip(), (version.strip() or None) if sep else None
+
+
 def load_member(name: str, version: str | None = None, root: Path | None = None) -> RegistryMember:
     """Load one member by registry name, newest version unless pinned."""
     registry_name = _registry_name(name, root)
@@ -667,7 +680,8 @@ def train_ensemble(
     ranks them by how well they memorised rather than by how well they predict.
 
     Args:
-        members: registry names (or :data:`MEMBER_ALIASES`) of the members.
+        members: registry names (or :data:`MEMBER_ALIASES`), each optionally
+            pinned as ``"name:version"``.
         meta: ``"logit_mean"`` (the ADR default) or ``"logistic_stacker"``.
         versions: pin specific member versions, ``{member_name: version}``.
         seasons / train_through / val_season / stride / root: dataset selection,
@@ -693,7 +707,13 @@ def train_ensemble(
             "calibrator are fit on val, so there is nothing to fit"
         )
 
-    loaded = [load_member(m, (versions or {}).get(m), models_root) for m in members]
+    pinned = dict(versions or {})
+    loaded: list[RegistryMember] = []
+    for spec in members:
+        member_name, spec_version = split_member_spec(spec)
+        loaded.append(
+            load_member(member_name, spec_version or pinned.get(member_name), models_root)
+        )
     log.info("ensemble members: %s", [f"{m.member}/{m.version}" for m in loaded])
 
     calib: Calibrator | None = None

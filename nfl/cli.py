@@ -342,7 +342,10 @@ def train(
         str | None,
         typer.Option(
             "--members",
-            help="Ensemble only: comma-separated member names; default is the ADR 0003 three.",
+            help=(
+                "Ensemble only: comma-separated 'name[:version]'; the version pins a "
+                "registry artifact. Default is the ADR 0003 three, each at its latest."
+            ),
         ),
     ] = None,
     meta: Annotated[

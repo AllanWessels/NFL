@@ -39,6 +39,7 @@ from nfl.models.train_ensemble import (
     member_context,
     promotion_gate,
     q4_row_indices,
+    split_member_spec,
     train_ensemble,
 )
 
@@ -176,6 +177,29 @@ def test_load_member_honours_a_pin(stocked):
     member = load_member("flat", "20240101T000000", root=stocked)
     assert member.version == "20240101T000000"
     assert member.predict_proba(pl.DataFrame({"x": [1.0]}))[0] == pytest.approx(0.55)
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("flat", ("flat", None)),
+        ("flat:20240101T000000", ("flat", "20240101T000000")),
+        (" flat : 20240101T000000 ", ("flat", "20240101T000000")),
+        ("flat:", ("flat", None)),
+    ],
+)
+def test_member_specs_split_into_name_and_pin(spec, expected):
+    assert split_member_spec(spec) == expected
+
+
+def test_a_pinned_member_spec_reaches_the_registry(stocked, frames, tmp_path):
+    """``--members name:version`` is how a reported run stays reproducible."""
+    _save(ConstantModel(p=0.9, name="flat"), stocked, "flat", "20250101T000000")
+    ensemble, result = _train(
+        frames, stocked, tmp_path, members=["flat:20240101T000000", "oracle0", "oracle1"]
+    )
+    pins = {p["name"]: p["version"] for p in result.extra["members"]}
+    assert pins["flat"] == "20240101T000000"
 
 
 def test_an_unknown_member_says_what_is_available(stocked):
