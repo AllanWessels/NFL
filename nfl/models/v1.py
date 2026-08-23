@@ -10,8 +10,11 @@ and the promotion decision is computed rather than eyeballed:
 4. ``tf_mlp`` on ``v1``, likewise — cheap enough to keep in the line-up.
 
 Every model is then scored with :func:`nfl.models.metrics.slice_metrics` on
-*both* the validation season and the held-out test seasons, over the five
-slices the project reports: overall, Q4@600/300/120, and not-collapsed.
+*both* the validation season and the held-out test seasons, over the slices the
+project reports: overall, Q4@600/300/120, and not-collapsed. The floor is
+trained and scored first so its probability can key ``not_collapsed`` for every
+other model in the table — one row set, or the comparison is between
+populations rather than between models.
 
 **The gate** (ADR 0003 item 5) is checked by :func:`promotion_gate`: a
 candidate is promotable only if it beats the naive floor on *all three* val Q4
@@ -53,6 +56,7 @@ log = logging.getLogger(__name__)
 SLICE_ORDER: tuple[str, ...] = (
     *[f"q4_{m}s" for m in Q4_MARKS],
     "not_collapsed",
+    "not_collapsed_own",
     "overall",
 )
 
@@ -91,8 +95,15 @@ PHASE5_TEST_LOG_LOSS: dict[str, dict[str, float]] = {
 # --------------------------------------------------------------------------- #
 
 
-def _slices(frame: pl.DataFrame, probs: np.ndarray, y: np.ndarray, label: str, split: str):
-    table = slice_metrics(frame, probs, y)
+def _slices(
+    frame: pl.DataFrame,
+    probs: np.ndarray,
+    y: np.ndarray,
+    label: str,
+    split: str,
+    reference_probs: np.ndarray | None = None,
+):
+    table = slice_metrics(frame, probs, y, reference_probs=reference_probs)
     return table.with_columns(pl.lit(label).alias("model"), pl.lit(split).alias("split")).select(
         "model", "split", "slice", "n", "log_loss", "brier", "accuracy", "auc", "ece"
     )
@@ -178,20 +189,27 @@ def train_and_report(
         "frames: train=%d val=%d test=%d", data.train.height, data.val.height, data.test.height
     )
     parts: list[pl.DataFrame] = []
+    # The floor's probability per split, keeping ``not_collapsed`` on one row
+    # set for every model in the table (ADR 0003 §5). The floor is scored first,
+    # so every later call finds it here.
+    reference: dict[str, np.ndarray] = {}
 
-    def score(label: str, predict) -> None:
+    def score(label: str, predict, *, is_floor: bool = False) -> None:
         for split in ("val", "test"):
             frame = getattr(data, split)
             if not frame.height:
                 continue
-            parts.append(_slices(frame, predict(frame), labels(frame), label, split))
+            probs = np.asarray(predict(frame), dtype=float).ravel()
+            if is_floor:
+                reference[split] = probs
+            parts.append(_slices(frame, probs, labels(frame), label, split, reference.get(split)))
 
     # -- 1. naive floor, unchanged from Phase 5 ---------------------------- #
     t0 = time.perf_counter()
     naive, naive_res = train_naive(frames=data, models_root=models_root, save=save)
     log.info("naive fitted in %.0fs", time.perf_counter() - t0)
     naive_features = list(naive_res.feature_names)
-    score("naive", lambda f: naive.predict_proba(design_matrix(f, naive_features)))
+    score("naive", lambda f: naive.predict_proba(design_matrix(f, naive_features)), is_floor=True)
 
     # -- 2. XGBoost, one fit per configuration ----------------------------- #
     # More than one is allowed because the feature-set question is not settled

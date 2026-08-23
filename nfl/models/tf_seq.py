@@ -26,7 +26,15 @@ the previous game — the leak this file most has to avoid.
 rides along as an extra channel whose padded steps are all-zero, so a
 ``Masking`` layer makes the GRU skip them rather than learn from invented plays.
 
+**Uncertainty.** :meth:`SeqWinProb.predict_with_uncertainty` runs ``n_samples``
+forward passes with dropout and the pre-game jitter left on, and returns
+``(mean, std)`` — the same MC-dropout head ``tf_mlp`` carries. That standard
+deviation is the σ ADR 0003 §4 wanted as a confidence signal: a 0.62 that every
+dropout mask agrees on is not the bet a 0.62 averaged over masks spanning
+0.35–0.85 is.
+
     >>> model, result = train_tf_seq()                     # doctest: +SKIP
+    >>> mean, std = model.predict_with_uncertainty(X, meta, n_samples=30)  # doctest: +SKIP
 """
 
 from __future__ import annotations
@@ -134,10 +142,34 @@ def _first_present(df: pl.DataFrame, names: Sequence[str], what: str) -> str:
     raise KeyError(f"frame has no {what} column; looked for {list(names)}")
 
 
+#: The key a single serving row is windowed under. One row is one snapshot of
+#: one game by construction, so the name is arbitrary — it only has to exist.
+_SERVING_GAME_ID = "__serving__"
+
+
 def _keyed(X: pl.DataFrame, meta: pl.DataFrame | None) -> pl.DataFrame:
-    """``X`` with the game key and ordering column attached, row order intact."""
+    """``X`` with the game key and ordering column attached, row order intact.
+
+    With no ``meta`` and no key already on the frame, a **single** row is keyed
+    as one game: the serving path (``nfl predict``) builds exactly one snapshot,
+    and a one-row window cannot reach into another game because there is no
+    other row. More than one unkeyed row is refused rather than guessed at —
+    inventing a shared key there would window across game boundaries, which is
+    the leak this module exists to prevent.
+    """
     if meta is None:
-        return X
+        if any(c in X.columns for c in _GAME_KEYS):
+            return X
+        if X.height != 1:
+            raise KeyError(
+                f"frame has no game id column (looked for {list(_GAME_KEYS)}) and "
+                f"{X.height} rows; pass meta= so the window knows where each game "
+                "starts. Only a single row can be keyed without it."
+            )
+        keyed = X.with_columns(pl.lit(_SERVING_GAME_ID).alias("meta__game_id"))
+        if not any(c in keyed.columns for c in _ORDER_KEYS):
+            keyed = keyed.with_columns(pl.lit(0.0).alias("meta__play_id"))
+        return keyed
     if meta.height != X.height:
         raise ValueError(f"meta has {meta.height} rows, X has {X.height}")
     extra = [c for c in meta.columns if c not in X.columns]
@@ -582,12 +614,74 @@ class SeqWinProb:
         out = self._model.predict(inputs, batch_size=self.batch_size, verbose=0)
         return np.asarray(out, dtype=np.float64).ravel()
 
-    def predict_proba(self, X: pl.DataFrame, meta: pl.DataFrame | None = None) -> np.ndarray:
-        """``P(home win)`` per row of ``X``."""
+    def _stochastic(self, inputs: dict[str, np.ndarray]) -> np.ndarray:
+        """One MC-dropout forward pass — every stochastic layer left switched on.
+
+        ``training=True`` is what keeps ``pregame_dropout``, ``head_dropout``
+        and the ``pregame_noise`` jitter live at inference. Called in batches
+        because the whole validation split at once does not fit in 16 GB.
+        """
+        n = next(iter(inputs.values())).shape[0]
+        chunks = [
+            np.asarray(
+                self._model(
+                    {k: v[i : i + self.batch_size] for k, v in inputs.items()}, training=True
+                ),
+                dtype=np.float64,
+            )
+            for i in range(0, n, self.batch_size)
+        ]
+        return np.concatenate(chunks).ravel() if chunks else np.zeros(0)
+
+    def _require_inputs(self, X: pl.DataFrame, meta: pl.DataFrame | None) -> dict[str, np.ndarray]:
         if self._model is None:
             raise RuntimeError(f"{self.name} is not fitted; call fit() or load()")
         assert_model_input(X, context=f"{self.name}.predict")
-        return self._predict(self._inputs(X, meta, fit=False))
+        return self._inputs(X, meta, fit=False)
+
+    def predict_proba(
+        self, X: pl.DataFrame, meta: pl.DataFrame | None = None, n_samples: int = 1
+    ) -> np.ndarray:
+        """``P(home win)`` per row of ``X``.
+
+        ``n_samples=1`` (the model contract's shape) is the ordinary
+        deterministic pass. Above that it averages that many MC-dropout passes,
+        which is exactly the mean :meth:`predict_with_uncertainty` returns.
+        """
+        inputs = self._require_inputs(X, meta)
+        if n_samples <= 1:
+            return self._predict(inputs)
+        total = np.zeros(next(iter(inputs.values())).shape[0], dtype=np.float64)
+        for _ in range(int(n_samples)):
+            total += self._stochastic(inputs)
+        return total / float(n_samples)
+
+    def predict_with_uncertainty(
+        self, X: pl.DataFrame, meta: pl.DataFrame | None = None, n_samples: int = 30
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """``(mean, std)`` over ``n_samples`` MC-dropout passes.
+
+        The GRU's own disagreement with itself, and the second confidence signal
+        ADR 0003 §4 asked for. The windowing is done once and the same tensors
+        are re-run, so ``n_samples`` costs forward passes and not feature work.
+
+        With ``dropout=0`` and ``pregame_noise=0`` nothing is stochastic, every
+        pass is identical and the standard deviation is exactly zero — correct,
+        and a signal that the model was built without a stochastic component
+        rather than that it is certain.
+        """
+        n = max(2, int(n_samples))
+        inputs = self._require_inputs(X, meta)
+        rows = next(iter(inputs.values())).shape[0]
+        total = np.zeros(rows, dtype=np.float64)
+        total_sq = np.zeros(rows, dtype=np.float64)
+        for _ in range(n):
+            p = self._stochastic(inputs)
+            total += p
+            total_sq += p * p
+        mean = total / n
+        var = np.maximum(total_sq / n - mean * mean, 0.0)
+        return mean, np.sqrt(var)
 
     # -- persistence ---------------------------------------------------------- #
 

@@ -136,6 +136,7 @@ def test_slice_metrics_reports_overall_q4_and_not_collapsed() -> None:
         "q4_300s",
         "q4_120s",
         "not_collapsed",
+        "not_collapsed_own",
     ]
     for metric in METRIC_NAMES:
         assert metric in table.columns
@@ -160,8 +161,51 @@ def test_not_collapsed_drops_rows_the_model_has_already_decided() -> None:
     y = np.ones(df.height)
     table = slice_metrics(df, probs, y)
     counts = dict(zip(table.get_column("slice"), table.get_column("n"), strict=True))
+    # With no reference the model is its own reference, so both variants agree.
     assert counts["not_collapsed"] == int((probs == 0.5).sum())
+    assert counts["not_collapsed_own"] == counts["not_collapsed"]
     assert counts["overall"] == df.height
+
+
+def test_not_collapsed_follows_the_reference_and_own_follows_the_model() -> None:
+    """The gated slice is the *reference's* live rows, whatever the model says."""
+    df = _eval_frame(n_games=2)
+    # The candidate has decided the first half of the frame; the reference has
+    # decided only its first quarter. Neither band is the other.
+    probs = np.where(np.arange(df.height) < df.height // 2, 0.99, 0.5)
+    reference = np.where(np.arange(df.height) < df.height // 4, 0.99, 0.5)
+    y = np.ones(df.height)
+    counts = dict(
+        zip(
+            *slice_metrics(df, probs, y, reference_probs=reference).select("slice", "n"),
+            strict=True,
+        )
+    )
+    assert counts["not_collapsed"] == int((reference == 0.5).sum())
+    assert counts["not_collapsed_own"] == int((probs == 0.5).sum())
+    assert counts["not_collapsed"] != counts["not_collapsed_own"]
+
+
+def test_two_models_sharing_a_reference_are_scored_on_the_same_rows() -> None:
+    """The whole point of the reference: one row set, so the gate compares models."""
+    df = _eval_frame(n_games=3)
+    rng = np.random.default_rng(11)
+    reference = rng.uniform(0.02, 0.98, df.height)
+    y = (rng.random(df.height) < reference).astype(float)
+    candidate_a = np.clip(reference + 0.05, 0.01, 0.99)
+    candidate_b = np.full(df.height, 0.97)  # collapsed on every single row
+
+    def n_gated(probs: np.ndarray) -> int:
+        table = slice_metrics(df, probs, y, reference_probs=reference)
+        return int(table.filter(pl.col("slice") == "not_collapsed").get_column("n")[0])
+
+    assert n_gated(candidate_a) == n_gated(candidate_b)
+
+
+def test_slice_metrics_rejects_a_misaligned_reference() -> None:
+    df = _eval_frame(n_games=1)
+    with pytest.raises(ValueError, match="reference_probs"):
+        slice_metrics(df, np.zeros(df.height), np.zeros(df.height), reference_probs=np.zeros(3))
 
 
 def test_slice_metrics_rejects_misaligned_probabilities() -> None:

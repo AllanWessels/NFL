@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import polars as pl
@@ -54,6 +54,7 @@ from nfl.models.registry import resolve_artifact, utc_version
 
 __all__ = [
     "CLOCK_CANDIDATES",
+    "CONFIDENCE_MODES",
     "ConfidenceMode",
     "MetaKind",
     "StackedEnsemble",
@@ -62,7 +63,29 @@ __all__ = [
 ]
 
 MetaKind = Literal["mean", "logit_mean", "logistic_stacker"]
-ConfidenceMode = Literal["disagreement", "uncertainty", "combined"]
+
+#: How a row's confidence is derived. ``disagreement`` is member spread;
+#: ``uncertainty`` is the members' MC-dropout σ; ``margin`` is the calibrated
+#: probability's own distance from the coin flip; the two compound modes average
+#: a spread term with σ (``combined``) or the margin with σ
+#: (``margin_uncertainty``). ADR 0003 §4 says which one ships is decided by
+#: :func:`compare_confidence_definitions` on val Q4 rows, not by argument.
+ConfidenceMode = Literal["disagreement", "uncertainty", "combined", "margin", "margin_uncertainty"]
+
+#: Every value :data:`ConfidenceMode` allows, for validation and iteration.
+CONFIDENCE_MODES: tuple[str, ...] = (
+    "disagreement",
+    "uncertainty",
+    "combined",
+    "margin",
+    "margin_uncertainty",
+)
+
+#: Modes that need the MC-dropout σ of at least one member.
+_NEEDS_UNCERTAINTY: frozenset[str] = frozenset({"uncertainty", "combined", "margin_uncertainty"})
+
+#: Modes that need the calibrated probability of the row being scored.
+_NEEDS_PROBABILITY: frozenset[str] = frozenset({"margin", "margin_uncertainty"})
 
 #: Where to look for the game clock when a phase-aware calibrator needs it.
 #: A feature frame carries the prefixed builder output; a raw play-by-play frame
@@ -286,7 +309,7 @@ class StackedEnsemble:
             raise ValueError("StackedEnsemble needs at least one member")
         if self.meta not in ("mean", "logit_mean", "logistic_stacker"):
             raise ValueError(f"unknown meta {self.meta!r}")
-        if self.confidence_mode not in ("disagreement", "uncertainty", "combined"):
+        if self.confidence_mode not in CONFIDENCE_MODES:
             raise ValueError(f"unknown confidence_mode {self.confidence_mode!r}")
 
     # -- introspection ---------------------------------------------------- #
@@ -385,19 +408,38 @@ class StackedEnsemble:
         raw = self.combine(self.member_probabilities(X))
         return self._calibrate(raw, self._resolve_clock(X, seconds_remaining))
 
+    def needs_uncertainty(self, mode: str | None = None) -> bool:
+        """Whether ``mode`` (default: the configured one) needs member σ."""
+        return (mode or self.confidence_mode) in _NEEDS_UNCERTAINTY
+
     def confidence_from(
-        self, member_probs: np.ndarray, uncertainty: np.ndarray | None = None
+        self,
+        member_probs: np.ndarray,
+        uncertainty: np.ndarray | None = None,
+        p: np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        """Confidence in ``[0, 1]`` plus the raw spread signals behind it.
+        """Confidence in ``[0, 1]`` plus the raw signals behind it.
 
-        ``logit_std`` is the population standard deviation of member logits;
-        ``mc_std`` is the mean per-member MC standard deviation in probability
-        space. Each is divided by its scale and clipped, so confidence is ``1``
-        when members are unanimous and ``0`` once spread reaches that scale.
+        Three signals, each normalised to a "penalty" that confidence is one
+        minus:
 
-        A single member cannot disagree with itself: disagreement confidence is
-        then identically 1 — honest about the formula, useless as a signal. Use
-        at least two members, or ``uncertainty`` mode.
+        ``logit_std``
+            Population standard deviation of the member logits — how much the
+            members disagree. Divided by :attr:`disagreement_scale`.
+        ``mc_std``
+            Mean per-member MC-dropout standard deviation in probability space —
+            how much a member disagrees with itself. Divided by
+            :attr:`uncertainty_scale`.
+        ``margin``
+            ``2 * |p - 0.5|`` on the **calibrated** probability — how far from a
+            coin flip the ensemble's own answer is. Already in ``[0, 1]``, so
+            its penalty is ``1 - margin``.
+
+        ``p`` is the calibrated probability and is required by the ``margin``
+        modes; the other modes ignore it. A single member cannot disagree with
+        itself, so disagreement confidence over one member is identically 1 —
+        honest about the formula, useless as a signal. Use at least two members,
+        or a mode that does not rest on spread.
         """
         probs = np.asarray(member_probs, dtype=float)
         z = logit(probs.ravel()).reshape(probs.shape)
@@ -409,21 +451,39 @@ class StackedEnsemble:
             mc = np.asarray(uncertainty, dtype=float).mean(axis=1)
             signals["mc_std"] = mc
 
+        margin = None
+        if p is not None:
+            margin = np.clip(2.0 * np.abs(np.asarray(p, dtype=float).ravel() - 0.5), 0.0, 1.0)
+            signals["margin"] = margin
+
         mode = self.confidence_mode
-        if mode in ("uncertainty", "combined") and mc is None:
+        if mode in _NEEDS_UNCERTAINTY and mc is None:
             if mode == "uncertainty":
                 raise ValueError(
                     "confidence_mode='uncertainty' but no member exposes predict_with_uncertainty"
                 )
-            mode = "disagreement"
+            # The compound modes degrade to their other half rather than fail:
+            # an ensemble whose GRU was swapped for one without an MC head still
+            # returns a confidence, just a less informed one.
+            mode = "margin" if mode == "margin_uncertainty" else "disagreement"
+        if mode in _NEEDS_PROBABILITY and margin is None:
+            raise ValueError(
+                f"confidence_mode={self.confidence_mode!r} needs the calibrated probability; "
+                "pass p= (predict_with_confidence does this for you)"
+            )
 
         dis_term = spread / max(self.disagreement_scale, 1e-9)
+        mc_term = None if mc is None else np.asarray(mc) / max(self.uncertainty_scale, 1e-9)
         if mode == "disagreement":
             penalty = dis_term
         elif mode == "uncertainty":
-            penalty = np.asarray(mc) / max(self.uncertainty_scale, 1e-9)
-        else:
-            penalty = 0.5 * (dis_term + np.asarray(mc) / max(self.uncertainty_scale, 1e-9))
+            penalty = cast("np.ndarray", mc_term)
+        elif mode == "combined":
+            penalty = 0.5 * (dis_term + cast("np.ndarray", mc_term))
+        elif mode == "margin":
+            penalty = 1.0 - cast("np.ndarray", margin)
+        else:  # margin_uncertainty
+            penalty = 0.5 * ((1.0 - cast("np.ndarray", margin)) + cast("np.ndarray", mc_term))
         confidence = 1.0 - np.clip(penalty, 0.0, 1.0)
         signals["confidence"] = confidence
         return confidence, signals
@@ -438,10 +498,10 @@ class StackedEnsemble:
         the uncalibrated blend, the spread signals, and the confidence.
         """
         probs = self.member_probabilities(X)
-        uncertainty = self.member_uncertainty(X) if self.confidence_mode != "disagreement" else None
+        uncertainty = self.member_uncertainty(X) if self.needs_uncertainty() else None
         raw = self.combine(probs)
         calibrated = self._calibrate(raw, self._resolve_clock(X, seconds_remaining))
-        confidence, signals = self.confidence_from(probs, uncertainty)
+        confidence, signals = self.confidence_from(probs, uncertainty, calibrated)
         components: dict[str, np.ndarray] = {
             f"member__{n}": probs[:, i] for i, n in enumerate(self.member_names)
         }

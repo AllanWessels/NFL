@@ -16,11 +16,24 @@ population. ``reliability_table`` returns the same decomposition per bin, which
 is what you actually plot.
 
 **Slices.** :func:`slice_metrics` is the report the project is judged on:
-overall, then the three late-Q4 marks (600s, 300s, 120s left), then the
-"not collapsed" subset. Note that *this* module defines not-collapsed by the
-**model's own** probability sitting in ``[0.15, 0.85]`` — the market-implied
-version in :func:`nfl.features.splits.not_collapsed` needs a market column that
-by ADR 0001 never exists on a feature frame, and is joined in downstream.
+overall, then the three late-Q4 marks (600s, 300s, 120s left), then two
+"not collapsed" subsets.
+
+``not_collapsed`` is keyed on ``reference_probs`` — the *floor model's*
+probability sitting in ``[0.15, 0.85]``. Passing a reference is what makes two
+models comparable on this slice: candidate and floor are then scored on
+**identical rows**, so a difference in the number is a difference in skill
+rather than a difference in population. Omit it and the reference is the
+model's own probability, which is the right answer for the floor itself (its
+own band *is* the reference band) and a self-selected sample for anything else.
+
+``not_collapsed_own`` is always keyed on the model's own probability. It is
+reported for information — "how does this model do on the rows *it* thinks are
+live" — and is deliberately **not** what the promotion gate reads.
+
+The market-implied version in :func:`nfl.features.splits.not_collapsed` needs a
+market column that by ADR 0001 never exists on a feature frame, and is joined
+in downstream; both bands here are the model-side stand-in until it lands.
 
     >>> import numpy as np
     >>> log_loss(np.array([0.9, 0.2]), np.array([1.0, 0.0])) < 0.2
@@ -40,6 +53,8 @@ __all__ = [
     "COLLAPSE_BOUNDS",
     "EPS",
     "METRIC_NAMES",
+    "NOT_COLLAPSED_OWN_SLICE",
+    "NOT_COLLAPSED_SLICE",
     "Q4_MARKS",
     "accuracy",
     "auc",
@@ -59,6 +74,12 @@ METRIC_NAMES: tuple[str, ...] = ("log_loss", "brier", "accuracy", "auc", "ece")
 
 #: Seconds remaining in regulation at the Q4 marks the project reports on.
 Q4_MARKS: tuple[int, ...] = (600, 300, 120)
+
+#: The gated not-collapsed slice: rows the *reference* model has not decided.
+NOT_COLLAPSED_SLICE = "not_collapsed"
+
+#: The informational variant: rows the model being scored has not decided.
+NOT_COLLAPSED_OWN_SLICE = "not_collapsed_own"
 
 
 def _prepared(probs: object, y: object) -> tuple[np.ndarray, np.ndarray]:
@@ -202,6 +223,7 @@ def metrics_dict(probs: object, y: object, *, bins: int = 10) -> dict[str, float
 
 _PROB_COL = "_metrics__prob"
 _LABEL_COL = "_metrics__y"
+_REF_COL = "_metrics__ref"
 
 
 def slice_metrics(
@@ -209,6 +231,7 @@ def slice_metrics(
     probs: object,
     y: object,
     *,
+    reference_probs: object | None = None,
     bins: int = 10,
     q4_marks: Sequence[int] = Q4_MARKS,
     collapse_bounds: Sequence[float] = COLLAPSE_BOUNDS,
@@ -224,6 +247,13 @@ def slice_metrics(
     A Q4 row is "the last snapshot at or before the mark", one per game, via
     :func:`nfl.features.splits.q4_at`; a game that never reaches the mark
     contributes nothing.
+
+    ``reference_probs`` is the floor model's probability on the *same rows*, and
+    it is what :data:`NOT_COLLAPSED_SLICE` is keyed on. Two models given the
+    same reference are scored on the same rows, which is the only way that
+    comparison means anything (ADR 0003 §5). Omitted, the reference is ``probs``
+    itself — right for the floor, self-selected for anything else.
+    :data:`NOT_COLLAPSED_OWN_SLICE` always uses ``probs`` and is informational.
     """
     p = np.asarray(probs, dtype=np.float64).ravel()
     t = np.asarray(y, dtype=np.float64).ravel()
@@ -231,9 +261,15 @@ def slice_metrics(
         raise ValueError(
             f"probs/y must align with df rows; got {len(p)}/{len(t)} for {df.height} rows"
         )
+    ref = p if reference_probs is None else np.asarray(reference_probs, dtype=np.float64).ravel()
+    if len(ref) != df.height:
+        raise ValueError(
+            f"reference_probs must align with df rows; got {len(ref)} for {df.height} rows"
+        )
     work = df.with_columns(
         pl.Series(_PROB_COL, p, dtype=pl.Float64),
         pl.Series(_LABEL_COL, t, dtype=pl.Float64),
+        pl.Series(_REF_COL, ref, dtype=pl.Float64),
     ).filter(pl.col(_LABEL_COL).is_not_null() & pl.col(_PROB_COL).is_not_null())
 
     lo, hi = float(collapse_bounds[0]), float(collapse_bounds[1])
@@ -242,7 +278,13 @@ def slice_metrics(
         parts.append((f"q4_{int(mark)}s", q4_at(work, int(mark), tolerance=tolerance)))
     parts.append(
         (
-            "not_collapsed",
+            NOT_COLLAPSED_SLICE,
+            work.filter(pl.col(_REF_COL).is_between(lo, hi)),
+        )
+    )
+    parts.append(
+        (
+            NOT_COLLAPSED_OWN_SLICE,
             work.filter(pl.col(_PROB_COL).is_between(lo, hi)),
         )
     )

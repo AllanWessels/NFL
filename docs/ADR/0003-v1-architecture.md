@@ -29,12 +29,22 @@ game-constant columns — ~3.4k independent games masquerading as 622k rows.
 3. **Ensemble = naive logistic + XGBoost(GPU) + TF GRU sequence model**, combined by `logit_mean`
    (or logistic stacker if it wins on val Q4), then **phase-aware calibration** (seconds-remaining
    buckets) fit on val.
-4. **Confidence** = member disagreement, optionally blended with GRU MC-dropout σ; the definition is
-   chosen empirically by `confidence_reliability` on val Q4 rows.
+4. **Confidence** is chosen empirically by `confidence_reliability` on val Q4 rows, from five
+   candidates: member disagreement, GRU MC-dropout σ, the calibrated margin `2·|p−0.5|`, and the
+   two blends (σ with disagreement, σ with margin). The winner must be **negatively** rank-
+   correlated with per-bin Brier — more confidence, less error — or it is a reassuring number that
+   means nothing. The ranking table and the winner both go in the ensemble manifest.
 5. **Promotion gate:** a candidate is promoted to PRODUCTION only if it beats the naive floor on
    val Q4@600/300/120 log-loss *and* Brier, and is not worse on the not-collapsed subset.
+   **The not-collapsed subset is one row set, defined by the floor's probability band** `[0.15,
+   0.85]`, so candidate and floor are scored on identical rows and a difference in the number is a
+   difference in skill. Keying it on each model's own band — the first cut — compared populations
+   rather than models: a sharper candidate collapses more rows, keeps the harder ones, and loses
+   the comparison for being better. That variant survives as `not_collapsed_own`, reported for
+   information and never gated. `nfl promote` is the gate's command-line face, and it writes
+   `data/models/PRODUCTION.json` when the gate passes.
 6. Market data remains evaluation-only (ADR 0001); "not collapsed" for trading is defined on the
-   *market* price once the ledger has Kalshi snapshots, on the model's own p until then.
+   *market* price once the ledger has Kalshi snapshots, on the floor's p until then.
 
 ## Consequences
 
