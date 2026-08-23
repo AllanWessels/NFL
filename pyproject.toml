@@ -68,11 +68,11 @@ ignore = ["E501"]
 # specification, not hand-formatted source. `X` / `X_val` are part of that
 # contract and reappear in every model implementation.
 "nfl/models/base.py" = ["I001", "N803", "UP037"]
+"nfl/models/*.py" = ["N803"]
+"tests/test_models_*.py" = ["N803", "N806"]
 
 # `X` for a design matrix is the sklearn/xgboost convention and is part of
 # the `nfl.models.base.WinProbModel` contract; N803 would fight it everywhere.
-"nfl/models/*.py" = ["N803"]
-"tests/test_models_*.py" = ["N803", "N806"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

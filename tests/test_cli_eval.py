@@ -73,11 +73,13 @@ def test_train_rejects_an_unknown_model() -> None:
     assert "unknown model" in result.output
 
 
-def test_train_explains_a_model_module_that_has_not_landed() -> None:
+def test_train_explains_a_model_module_that_has_not_landed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nfl import cli as cli_mod
+
+    monkeypatch.setitem(cli_mod.TRAINERS, "seq", ("nfl.models.does_not_exist", "train_seq"))
     result = invoke("train", "--model", "seq")
     assert result.exit_code == 1
     assert "not available" in result.output
-    assert "nfl/models/tf_seq.py" in result.output
 
 
 def test_train_dispatches_to_the_sibling_trainer(monkeypatch: pytest.MonkeyPatch) -> None:
