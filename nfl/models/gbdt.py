@@ -50,7 +50,9 @@ import polars as pl
 
 from nfl.models.artifacts import assert_model_input_frame, model_dir, new_version, write_manifest
 from nfl.models.base import FitResult
-from nfl.models.data import ModelFrames, load_model_frames
+from nfl.models.data import ModelFrames, design_matrix, labels, load_model_frames
+from nfl.models.feature_sets import feature_set_columns
+from nfl.models.game_aware import Q4Selection, game_weights, q4_selection
 from nfl.models.metrics import metrics_dict, slice_metrics
 
 __all__ = [
@@ -208,6 +210,10 @@ class XGBoostWinProb:
         num_boost_round: ceiling on trees; early stopping usually bites first.
         early_stopping_rounds: val log-loss patience.
         device: ``"cuda"``, ``"cpu"``, or ``"auto"`` (cuda when usable).
+        selection_metric: ``"val"`` early-stops on overall validation log-loss
+            (Phase 5 behaviour); ``"q4"`` early-stops on the mean log-loss over
+            the Q4@600/300/120 marks instead, which is what ADR 0003 asks for
+            and requires a ``val_selection`` (or ``meta_val``) at ``fit``.
     """
 
     name: str = NAME
@@ -215,6 +221,7 @@ class XGBoostWinProb:
     num_boost_round: int = 3000
     early_stopping_rounds: int = 50
     device: str = "auto"
+    selection_metric: str = "val"
     max_cardinality: int = MAX_CATEGORY_CARDINALITY
     version: str = ""
     booster: Any = field(default=None, repr=False)
@@ -228,7 +235,14 @@ class XGBoostWinProb:
         merged["device"] = device
         return merged
 
-    def _dmatrix(self, X: pl.DataFrame, y: np.ndarray | None = None, *, ref: Any = None) -> Any:
+    def _dmatrix(
+        self,
+        X: pl.DataFrame,
+        y: np.ndarray | None = None,
+        *,
+        ref: Any = None,
+        weight: np.ndarray | None = None,
+    ) -> Any:
         import xgboost as xgb
 
         matrix = self.encoding.matrix(X)
@@ -245,6 +259,8 @@ class XGBoostWinProb:
             kwargs["nthread"] = int(nthread)
         if y is not None:
             kwargs["label"] = np.asarray(y, dtype=np.float32)
+        if weight is not None:
+            kwargs["weight"] = np.asarray(weight, dtype=np.float32)
         if ref is not None:
             return xgb.QuantileDMatrix(matrix, ref=ref, **kwargs)
         return xgb.QuantileDMatrix(matrix, **kwargs)
@@ -257,21 +273,60 @@ class XGBoostWinProb:
         y: np.ndarray,
         X_val: pl.DataFrame | None = None,
         y_val: np.ndarray | None = None,
+        *,
+        sample_weight: np.ndarray | None = None,
+        val_selection: Q4Selection | None = None,
     ) -> FitResult:
-        """Boost until val log-loss stops improving (or ``num_boost_round``)."""
+        """Boost until the selection metric stops improving (or ``num_boost_round``).
+
+        ``sample_weight`` is the per-row weight vector — pass
+        :func:`nfl.models.game_aware.game_weights` for game-aware training.
+        ``val_selection`` supplies the Q4 rows that ``selection_metric="q4"``
+        early-stops on; it is built from the *validation frame's* ``meta__``
+        columns, so it has to be handed in rather than derived from ``X_val``.
+        """
         import xgboost as xgb
 
         assert_model_input_frame(X, context=f"{self.name}.fit")
         y = np.asarray(y, dtype=np.float64)
         self.encoding = _Encoding.from_frame(X, max_cardinality=self.max_cardinality)
 
-        dtrain = self._dmatrix(X, y)
+        weights = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+        if weights is not None and weights.shape[0] != X.height:
+            raise ValueError(f"sample_weight has {weights.shape[0]} rows, X has {X.height}")
+
+        dtrain = self._dmatrix(X, y, weight=weights)
         evals = [(dtrain, "train")]
         dval = None
         if X_val is not None and y_val is not None:
             assert_model_input_frame(X_val, context=f"{self.name}.fit(val)")
             dval = self._dmatrix(X_val, np.asarray(y_val, dtype=np.float64), ref=dtrain)
             evals.append((dval, "val"))
+
+        # XGBoost early-stops on the *last* entry of ``evals``, so appending the
+        # Q4 slice is all it takes to switch the selection criterion. The
+        # per-mark 1/n weights make the booster's weighted logloss identical to
+        # ``Q4Selection.mean_log_loss``.
+        selection = str(self.selection_metric).lower()
+        if selection not in {"val", "q4"}:
+            raise ValueError(f"selection_metric must be 'val' or 'q4'; got {self.selection_metric}")
+        if selection == "q4":
+            if dval is None or val_selection is None or len(val_selection) == 0:
+                raise ValueError(
+                    "selection_metric='q4' needs a validation set and a non-empty val_selection"
+                )
+            rows = val_selection.rows
+            evals.append(
+                (
+                    self._dmatrix(
+                        X_val[rows],  # type: ignore[index]
+                        np.asarray(y_val, dtype=np.float64)[rows],
+                        ref=dtrain,
+                        weight=val_selection.weights,
+                    ),
+                    "val_q4",
+                )
+            )
 
         wanted = "cuda" if self.device == "auto" else self.device
         if wanted == "cuda" and not cuda_available():
@@ -331,6 +386,9 @@ class XGBoostWinProb:
             feature_names=list(self.encoding.columns),
             extra={
                 "device": wanted,
+                "selection_metric": selection,
+                "sample_weighted": weights is not None,
+                "effective_train_weight": float(np.sum(weights)) if weights is not None else None,
                 "best_iteration": self.best_iteration,
                 "n_trees": int(booster.num_boosted_rounds()),
                 "fit_seconds": round(elapsed, 2),
@@ -459,23 +517,46 @@ def train_xgboost(
     early_stopping_rounds: int = 50,
     save: bool = True,
     top_k_importance: int = 100,
+    feature_set: str = "full",
+    selection_metric: str = "val",
+    weight_by_game: bool = False,
 ) -> tuple[XGBoostWinProb, FitResult]:
     """Train :class:`XGBoostWinProb` on the assembled dataset and save it.
 
     The manifest carries the top ``top_k_importance`` features by gain, the
-    per-group importance shares, and the val/test slice tables.
+    per-group importance shares, the feature-set name, and the val/test slice
+    tables.
+
+    ``feature_set`` narrows the design matrix (see
+    :mod:`nfl.models.feature_sets`); ``weight_by_game`` gives every game equal
+    weight rather than every play; ``selection_metric="q4"`` early-stops on the
+    Q4 marks. The ADR 0003 v1 configuration is
+    ``feature_set="v1", weight_by_game=True, selection_metric="q4"``.
     """
     data = frames if frames is not None else load_model_frames(seasons, root=root, stride=stride)
-    x_train, y_train = data.as_xy("train")
-    x_val, y_val = data.as_xy("val")
+    features = feature_set_columns(data.train, feature_set)
+    x_train, y_train = design_matrix(data.train, features), labels(data.train)
+    x_val, y_val = design_matrix(data.val, features), labels(data.val)
+
+    weights = game_weights(data.train.select("meta__game_id")) if weight_by_game else None
+    selection = q4_selection(data.val) if selection_metric == "q4" else None
 
     model = XGBoostWinProb(
         params=dict(params or {}),
         device=device,
         num_boost_round=num_boost_round,
         early_stopping_rounds=early_stopping_rounds,
+        selection_metric=selection_metric,
     )
-    result = model.fit(x_train, y_train, x_val, y_val)
+    result = model.fit(
+        x_train, y_train, x_val, y_val, sample_weight=weights, val_selection=selection
+    )
+    result.extra["feature_set"] = feature_set
+    if selection is not None:
+        q4_p = model.predict_proba(x_val)[selection.rows]
+        result.extra["val_q4_selection_log_loss"] = selection.mean_log_loss(
+            q4_p, y_val[selection.rows]
+        )
 
     importance = model.feature_importance("gain")
     result.extra["feature_importance_gain"] = importance.head(top_k_importance).to_dicts()
@@ -484,7 +565,7 @@ def train_xgboost(
     val_table = slice_metrics(data.val, model.predict_proba(x_val), y_val)
     result.extra["val_slices"] = val_table.to_dicts()
     if data.test.height:
-        x_test, y_test = data.as_xy("test")
+        x_test, y_test = design_matrix(data.test, features), labels(data.test)
         test_table = slice_metrics(data.test, model.predict_proba(x_test), y_test)
         result.extra["test_slices"] = test_table.to_dicts()
 
@@ -502,6 +583,10 @@ def train_xgboost(
             train_seasons=seasons_in(data.train),
             extra={
                 "kind": "xgboost",
+                "feature_set": feature_set,
+                "selection_metric": selection_metric,
+                "weight_by_game": weight_by_game,
+                "val_q4_selection_log_loss": result.extra.get("val_q4_selection_log_loss"),
                 "device": result.extra["device"],
                 "params": result.extra["params"],
                 "best_iteration": model.best_iteration,

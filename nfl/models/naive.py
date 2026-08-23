@@ -357,6 +357,7 @@ def train_naive(
             train_seasons=seasons_in(data.train),
             extra={
                 "kind": "logistic_regression",
+                "feature_set": "naive9",
                 "terms": list(TERM_NAMES),
                 "coefficients": model.coefficients(),
                 "stride": stride,

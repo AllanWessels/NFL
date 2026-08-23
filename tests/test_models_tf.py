@@ -565,3 +565,110 @@ def test_new_version_is_a_utc_timestamp() -> None:
     version = new_version()
     assert len(version) == 15 and version[8] == "T"
     assert version.replace("T", "").isdigit()
+
+
+# --------------------------------------------------------------------------- #
+# ADR 0003: game-aware training for the Keras models
+# --------------------------------------------------------------------------- #
+
+
+def q4_frame(seed: int = 5) -> pl.DataFrame:
+    """A synthetic frame whose clock actually runs through the fourth quarter."""
+    df = synthetic_frame(seed, lengths={"G_a": 30, "G_b": 24, "G_c": 18})
+    # Compress every game's clock into 880..20 seconds of Q4 so all three marks
+    # are reachable; ``synthetic_frame`` alone never leaves the first half.
+    return df.with_columns(
+        pl.lit(4, dtype=pl.Int64).alias("meta__period"),
+        (880 - pl.int_range(pl.len()).over("meta__game_id") * 30)
+        .clip(20, 880)
+        .cast(pl.Float64)
+        .alias("meta__game_seconds_remaining"),
+    )
+
+
+def test_seq_v1_feature_set_narrows_the_tabular_branch() -> None:
+    from nfl.models.feature_sets import feature_set_columns
+
+    frame = q4_frame()
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+
+    wide = tiny_seq()
+    wide.fit(X, y, meta=meta)
+    narrow = tiny_seq(feature_set="v1")
+    narrow.fit(X, y, meta=meta)
+
+    assert narrow.pregame_names == feature_set_columns(X, "v1")
+    assert wide.pregame_names != narrow.pregame_names
+    # ``pregame_columns`` deliberately excludes the live state; the v1 set
+    # deliberately includes it.
+    assert any(c.startswith("ig__") for c in narrow.pregame_names)
+    assert not any(c.startswith("ig__") for c in wide.pregame_names)
+
+
+def test_seq_q4_selection_metric_logs_and_stops_on_the_q4_rows() -> None:
+    from nfl.models.game_aware import Q4_LOG_KEY, game_weights, q4_selection
+
+    frame = q4_frame()
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select(
+        "meta__game_id", "meta__play_id", "meta__period", "meta__game_seconds_remaining"
+    )
+    selection = q4_selection(meta)
+    assert len(selection) == 3 * 3  # three games, three marks
+
+    model = tiny_seq(feature_set="v1", selection_metric="q4", epochs=3)
+    result = model.fit(
+        X,
+        y,
+        X,
+        y,
+        meta=meta,
+        meta_val=meta,
+        sample_weight=game_weights(meta),
+        val_selection=selection,
+    )
+    assert Q4_LOG_KEY in model.history
+    assert len(model.history[Q4_LOG_KEY]) >= 1
+    assert result.extra["selection_metric"] == "q4"
+    assert result.extra["sample_weighted"] is True
+    assert result.extra["feature_set"] == "v1"
+
+
+def test_seq_q4_without_a_selection_raises() -> None:
+    frame = q4_frame()
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq(selection_metric="q4", epochs=1)
+    with pytest.raises(ValueError, match="needs a validation set"):
+        model.fit(X, y, X, y, meta=meta, meta_val=meta)
+
+
+def test_mlp_q4_selection_metric_logs_the_key() -> None:
+    from nfl.models.game_aware import Q4_LOG_KEY, game_weights, q4_selection
+
+    frame = q4_frame(seed=7)
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select(
+        "meta__game_id", "meta__play_id", "meta__period", "meta__game_seconds_remaining"
+    )
+    model = MLPWinProb(
+        hidden=(8,),
+        epochs=3,
+        batch_size=32,
+        patience=2,
+        prefer_gpu=False,
+        mixed_precision=False,
+        selection_metric="q4",
+    )
+    result = model.fit(
+        X, y, X, y, sample_weight=game_weights(meta), val_selection=q4_selection(meta)
+    )
+    assert Q4_LOG_KEY in model.history
+    assert result.extra["selection_metric"] == "q4"
+    assert result.extra["sample_weighted"] is True
+
+
+def test_mlp_rejects_an_unknown_selection_metric() -> None:
+    with pytest.raises(ValueError, match="selection_metric"):
+        MLPWinProb(selection_metric="brier")

@@ -44,6 +44,15 @@ import polars as pl
 from nfl.features.assemble import feature_columns
 from nfl.features.splits import DEFAULT_SPLIT, SeasonSplit
 from nfl.models.base import FitResult
+from nfl.models.feature_sets import feature_set_columns
+from nfl.models.game_aware import (
+    Q4_LOG_KEY,
+    Q4Selection,
+    game_weights,
+    make_q4_callback,
+    q4_selection,
+    subset_inputs,
+)
 from nfl.models.tf_common import (
     PREPROCESSOR_FILE,
     TabularPreprocessor,
@@ -315,12 +324,22 @@ class SeqWinProb:
         epochs: int = 60,
         patience: int = 8,
         seed: int = 17,
+        feature_set: str | None = None,
+        selection_metric: str = "val",
         prefer_gpu: bool = True,
         mixed_precision: bool = True,
         verbose: int = 0,
     ) -> None:
         if not 0.0 <= dropout < 1.0:
             raise ValueError(f"dropout must be in [0, 1); got {dropout}")
+        if selection_metric not in {"val", "q4"}:
+            raise ValueError(f"selection_metric must be 'val' or 'q4'; got {selection_metric!r}")
+        # ``None`` keeps the Phase 5 behaviour (tabular branch = everything that
+        # is not in-game); a name routes the branch through
+        # :func:`nfl.models.feature_sets.feature_set_columns` instead, which is
+        # how v1 hands the GRU's partner branch the in-play state as well.
+        self.feature_set = None if feature_set is None else str(feature_set)
+        self.selection_metric = str(selection_metric)
         self.k = int(k)
         self.play_embed = int(play_embed)
         self.gru_units = int(gru_units)
@@ -426,7 +445,11 @@ class SeqWinProb:
         seq, mask = _model_order(seq, mask)
         if fit:
             self.channel_stats = stats
-            self.pregame_names = pregame_columns(X)
+            self.pregame_names = (
+                pregame_columns(X)
+                if self.feature_set is None
+                else feature_set_columns(X, self.feature_set)
+            )
             pre = self.preprocessor.fit_transform(X.select(self.pregame_names))
         else:
             pre = self.preprocessor.transform(X.select(self.pregame_names))
@@ -443,12 +466,19 @@ class SeqWinProb:
         *,
         meta: pl.DataFrame | None = None,
         meta_val: pl.DataFrame | None = None,
+        sample_weight: np.ndarray | None = None,
+        val_selection: Q4Selection | None = None,
     ) -> FitResult:
         """Fit on ``X``/``y``; ``meta`` supplies ``meta__game_id`` for windowing.
 
         ``X`` is features only, per the model contract, so the game key has to
         arrive separately — unless the frame happens to still carry it, which is
         what the ``meta=None`` path allows for ad-hoc use.
+
+        ``sample_weight`` and ``val_selection`` are the ADR 0003 game-aware
+        knobs: per-row weights (see
+        :func:`nfl.models.game_aware.game_weights`) and the Q4 rows that
+        ``selection_metric="q4"`` early-stops on.
         """
         assert_model_input(X, context=f"{self.name}.fit(X)")
         if X_val is not None:
@@ -471,12 +501,33 @@ class SeqWinProb:
 
         self._model = self._build(train_in["pregame"].shape[1])
         monitor = "val_log_loss" if val_data is not None else "log_loss"
-        callbacks = [
+        callbacks: list[Any] = []
+        # Ordered before EarlyStopping so the key it writes is already in
+        # ``logs`` when the stopper reads it.
+        if self.selection_metric == "q4":
+            if val_data is None or val_selection is None or len(val_selection) == 0:
+                raise ValueError(
+                    "selection_metric='q4' needs a validation set and a non-empty val_selection"
+                )
+            callbacks.append(
+                make_q4_callback(
+                    subset_inputs(val_data[0], val_selection.rows),
+                    val_data[1].ravel()[val_selection.rows],
+                    val_selection,
+                    batch_size=self.batch_size,
+                )
+            )
+            monitor = Q4_LOG_KEY
+        callbacks += [
             tf.keras.callbacks.EarlyStopping(
                 monitor=monitor, patience=self.patience, restore_best_weights=True, mode="min"
             ),
             tf.keras.callbacks.ReduceLROnPlateau(
-                monitor=monitor, factor=0.5, patience=max(2, self.patience // 3), min_lr=1e-5
+                monitor=monitor,
+                factor=0.5,
+                patience=max(2, self.patience // 3),
+                min_lr=1e-5,
+                mode="min",
             ),
         ]
         t_fit = time.perf_counter()
@@ -484,6 +535,7 @@ class SeqWinProb:
             train_in,
             train_y,
             validation_data=val_data,
+            sample_weight=None if sample_weight is None else np.asarray(sample_weight, np.float32),
             epochs=self.epochs,
             batch_size=self.batch_size,
             callbacks=callbacks,
@@ -513,6 +565,12 @@ class SeqWinProb:
                 "k": self.k,
                 "n_play_channels": len(PLAY_CHANNELS),
                 "n_pregame_inputs": int(train_in["pregame"].shape[1]),
+                "feature_set": self.feature_set,
+                "selection_metric": self.selection_metric,
+                "sample_weighted": sample_weight is not None,
+                "val_q4_log_loss": self.history.get(Q4_LOG_KEY, [float("nan")])[-1]
+                if self.selection_metric == "q4"
+                else None,
                 "hyperparams": self._hyperparams(),
                 "runtime": runtime.as_dict(),
             },
@@ -548,6 +606,8 @@ class SeqWinProb:
             "epochs": self.epochs,
             "patience": self.patience,
             "seed": self.seed,
+            "feature_set": self.feature_set,
+            "selection_metric": self.selection_metric,
         }
 
     def save(self, path: Path) -> None:
@@ -606,9 +666,16 @@ def train_tf_seq(
     root: Path | None = None,
     models_root: Path | None = None,
     save: bool = True,
+    weight_by_game: bool = False,
     **kwargs: Any,
 ) -> tuple[SeqWinProb, FitResult]:
-    """Train ``tf_seq`` on the assembled dataset and persist the artifact."""
+    """Train ``tf_seq`` on the assembled dataset and persist the artifact.
+
+    ``kwargs`` go to :class:`SeqWinProb` — including ``feature_set`` and
+    ``selection_metric``. ``X`` always keeps every feature column so the
+    per-play channels can be derived; the *tabular branch* is what the feature
+    set narrows.
+    """
     train, val, _ = read_modelling_frames(seasons, split=split, root=root)
     if train.is_empty():
         raise ValueError("no training rows; run `nfl features build` first")
@@ -622,7 +689,10 @@ def train_tf_seq(
         labels_of(val),
         meta=train.select(meta_cols),
         meta_val=val.select(meta_cols),
+        sample_weight=game_weights(train.select("meta__game_id")) if weight_by_game else None,
+        val_selection=q4_selection(val) if model.selection_metric == "q4" else None,
     )
+    result.extra["weight_by_game"] = weight_by_game
     train_seasons = sorted(train.get_column("meta__season").unique().to_list())
     if save:
         directory = model_dir(model.name, result.version, root=models_root)

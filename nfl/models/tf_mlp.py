@@ -46,9 +46,17 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from nfl.features.assemble import feature_columns
 from nfl.features.splits import DEFAULT_SPLIT, SeasonSplit
 from nfl.models.base import FitResult
+from nfl.models.feature_sets import feature_set_columns
+from nfl.models.game_aware import (
+    Q4_LOG_KEY,
+    Q4Selection,
+    game_weights,
+    make_q4_callback,
+    q4_selection,
+    subset_inputs,
+)
 from nfl.models.tf_common import (
     PREPROCESSOR_FILE,
     TabularPreprocessor,
@@ -89,12 +97,16 @@ class MLPWinProb:
         epochs: int = 80,
         patience: int = 8,
         seed: int = 17,
+        selection_metric: str = "val",
         prefer_gpu: bool = True,
         mixed_precision: bool = True,
         verbose: int = 0,
     ) -> None:
         if not 0.0 <= dropout < 1.0:
             raise ValueError(f"dropout must be in [0, 1); got {dropout}")
+        if selection_metric not in {"val", "q4"}:
+            raise ValueError(f"selection_metric must be 'val' or 'q4'; got {selection_metric!r}")
+        self.selection_metric = str(selection_metric)
         self.hidden = tuple(int(h) for h in hidden)
         self.dropout = float(dropout)
         self.input_noise = float(input_noise)
@@ -168,8 +180,17 @@ class MLPWinProb:
         y: np.ndarray,
         X_val: pl.DataFrame | None = None,
         y_val: np.ndarray | None = None,
+        *,
+        sample_weight: np.ndarray | None = None,
+        val_selection: Q4Selection | None = None,
     ) -> FitResult:
-        """Fit on ``X``/``y``, early-stopping on the validation log-loss."""
+        """Fit on ``X``/``y``, early-stopping on the validation log-loss.
+
+        ``sample_weight`` is the per-row weight (pass
+        :func:`nfl.models.game_aware.game_weights` for game-aware training) and
+        ``val_selection`` supplies the Q4 rows that ``selection_metric="q4"``
+        watches instead of the overall validation log-loss.
+        """
         assert_model_input(X, context=f"{self.name}.fit(X)")
         if X_val is not None:
             assert_model_input(X_val, context=f"{self.name}.fit(X_val)")
@@ -191,12 +212,33 @@ class MLPWinProb:
 
         self._model = self._build(train_x.shape[1])
         monitor = "val_log_loss" if val_data is not None else "log_loss"
-        callbacks = [
+        callbacks: list[Any] = []
+        # The Q4 callback has to run *before* EarlyStopping so the key it writes
+        # is already in ``logs`` when the stopper reads it.
+        if self.selection_metric == "q4":
+            if val_data is None or val_selection is None or len(val_selection) == 0:
+                raise ValueError(
+                    "selection_metric='q4' needs a validation set and a non-empty val_selection"
+                )
+            callbacks.append(
+                make_q4_callback(
+                    subset_inputs(val_data[0], val_selection.rows),
+                    val_data[1].ravel()[val_selection.rows],
+                    val_selection,
+                    batch_size=self.batch_size,
+                )
+            )
+            monitor = Q4_LOG_KEY
+        callbacks += [
             tf.keras.callbacks.EarlyStopping(
                 monitor=monitor, patience=self.patience, restore_best_weights=True, mode="min"
             ),
             tf.keras.callbacks.ReduceLROnPlateau(
-                monitor=monitor, factor=0.5, patience=max(2, self.patience // 3), min_lr=1e-5
+                monitor=monitor,
+                factor=0.5,
+                patience=max(2, self.patience // 3),
+                min_lr=1e-5,
+                mode="min",
             ),
         ]
         t_fit = time.perf_counter()
@@ -204,6 +246,7 @@ class MLPWinProb:
             train_x,
             train_y,
             validation_data=val_data,
+            sample_weight=None if sample_weight is None else np.asarray(sample_weight, np.float32),
             epochs=self.epochs,
             batch_size=self.batch_size,
             callbacks=callbacks,
@@ -231,6 +274,11 @@ class MLPWinProb:
                 "fit_seconds": round(fit_seconds, 2),
                 "preprocess_seconds": round(prep_seconds, 2),
                 "n_inputs": int(train_x.shape[1]),
+                "selection_metric": self.selection_metric,
+                "sample_weighted": sample_weight is not None,
+                "val_q4_log_loss": self.history.get(Q4_LOG_KEY, [float("nan")])[-1]
+                if self.selection_metric == "q4"
+                else None,
                 "hyperparams": self._hyperparams(),
                 "runtime": runtime.as_dict(),
             },
@@ -310,6 +358,7 @@ class MLPWinProb:
             "epochs": self.epochs,
             "patience": self.patience,
             "seed": self.seed,
+            "selection_metric": self.selection_metric,
         }
 
     def save(self, path: Path) -> None:
@@ -355,21 +404,32 @@ def train_tf_mlp(
     root: Path | None = None,
     models_root: Path | None = None,
     save: bool = True,
+    feature_set: str = "full",
+    weight_by_game: bool = False,
     **kwargs: Any,
 ) -> tuple[MLPWinProb, FitResult]:
     """Train ``tf_mlp`` on the assembled dataset and persist the artifact.
 
     Seasons come from :mod:`nfl.features.splits` (train <= 2022, val 2023);
-    ``kwargs`` are forwarded to :class:`MLPWinProb`.
+    ``kwargs`` are forwarded to :class:`MLPWinProb`. ``feature_set`` names the
+    column selection (:mod:`nfl.models.feature_sets`) and ``weight_by_game``
+    switches on the 1/plays-per-game row weights of ADR 0003.
     """
     train, val, _ = read_modelling_frames(seasons, split=split, root=root)
     if train.is_empty():
         raise ValueError("no training rows; run `nfl features build` first")
-    features = feature_columns(train)
+    features = feature_set_columns(train, feature_set)
     model = MLPWinProb(**kwargs)
     result = model.fit(
-        train.select(features), labels_of(train), val.select(features), labels_of(val)
+        train.select(features),
+        labels_of(train),
+        val.select(features),
+        labels_of(val),
+        sample_weight=game_weights(train.select("meta__game_id")) if weight_by_game else None,
+        val_selection=q4_selection(val) if model.selection_metric == "q4" else None,
     )
+    result.extra["feature_set"] = feature_set
+    result.extra["weight_by_game"] = weight_by_game
     train_seasons = sorted(train.get_column("meta__season").unique().to_list())
     if save:
         directory = model_dir(model.name, result.version, root=models_root)
