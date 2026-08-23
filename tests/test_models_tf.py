@@ -536,6 +536,92 @@ def test_seq_takes_the_game_key_separately_from_the_features(frame: pl.DataFrame
     assert model.predict_proba(X, meta).shape == (frame.height,)
 
 
+def test_seq_scores_a_single_unkeyed_row_the_serving_path_way(frame: pl.DataFrame) -> None:
+    """``nfl predict`` builds one row and carries no ``meta__``; that must score."""
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq()
+    model.fit(X, y, meta=meta)
+
+    one = X.head(1)
+    p = model.predict_proba(one)
+    assert p.shape == (1,)
+    assert 0.0 < p[0] < 1.0
+
+
+def test_seq_refuses_to_invent_a_game_key_for_many_rows(frame: pl.DataFrame) -> None:
+    """Keying unrelated rows as one game would window across game boundaries."""
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq()
+    model.fit(X, y, meta=meta)
+    with pytest.raises(KeyError, match="pass meta="):
+        model.predict_proba(X.drop("ig__play_index"))
+
+
+def test_seq_mc_dropout_disagrees_with_itself_when_dropout_is_on(frame: pl.DataFrame) -> None:
+    """The GRU's MC head: the σ ADR 0003 §4 wanted as a confidence signal."""
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq(dropout=0.5)
+    model.fit(X, y, meta=meta)
+
+    mean, std = model.predict_with_uncertainty(X, meta, n_samples=25)
+    assert mean.shape == std.shape == (frame.height,)
+    assert (std >= 0.0).all()
+    assert (std > 0.0).mean() > 0.9, "dropout on: the passes must not all agree"
+    assert ((mean > 0.0) & (mean < 1.0)).all()
+
+    # ``n_samples > 1`` on predict_proba is the same MC average.
+    mc = model.predict_proba(X, meta, n_samples=25)
+    assert np.abs(mc - mean).mean() < 0.05
+
+
+def test_seq_mc_dropout_is_deterministic_when_the_stochastic_parts_are_off(
+    frame: pl.DataFrame,
+) -> None:
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq(dropout=0.0, pregame_noise=0.0)
+    model.fit(X, y, meta=meta)
+    _, std = model.predict_with_uncertainty(X, meta, n_samples=5)
+    assert np.allclose(std, 0.0)
+
+
+def test_seq_pregame_jitter_alone_also_spreads_the_mc_samples(frame: pl.DataFrame) -> None:
+    """The pre-game GaussianNoise is a stochastic layer, so it feeds σ too."""
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq(dropout=0.0, pregame_noise=1.0)
+    model.fit(X, y, meta=meta)
+    _, std = model.predict_with_uncertainty(X, meta, n_samples=20)
+    assert (std > 0.0).mean() > 0.9
+
+
+def test_seq_mc_head_survives_a_save_load_round_trip(tmp_path: Path, frame: pl.DataFrame) -> None:
+    """An ensemble loads members from the registry, so the head must persist."""
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq(dropout=0.5)
+    model.fit(X, y, meta=meta)
+    model.save(tmp_path / "artifact")
+
+    back = SeqWinProb.load(tmp_path / "artifact")
+    assert hasattr(back, "predict_with_uncertainty")
+    _, std = back.predict_with_uncertainty(X, meta, n_samples=10)
+    assert (std > 0.0).mean() > 0.9
+
+
+def test_seq_mc_head_refuses_leaky_inputs(frame: pl.DataFrame) -> None:
+    X, y = features_of(frame), labels_of(frame)
+    meta = frame.select("meta__game_id", "meta__play_id")
+    model = tiny_seq()
+    model.fit(X, y, meta=meta)
+    leaky = pl.concat([X, meta.select("meta__game_id")], how="horizontal")
+    with pytest.raises(AssertionError, match="label__/meta__"):
+        model.predict_with_uncertainty(leaky)
+
+
 def test_seq_masking_makes_the_padded_steps_inert(frame: pl.DataFrame) -> None:
     """Perturbing masked slots must not move a prediction."""
     X, y = features_of(frame), labels_of(frame)

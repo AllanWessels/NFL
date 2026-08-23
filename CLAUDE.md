@@ -50,12 +50,39 @@ uv run mypy nfl                # type check (advisory for now)
 uv run pre-commit install      # enable git hooks once per clone
 
 uv run nfl ingest nflverse --seasons 2010-2025 [--tables pbp,schedules] [--force]
-uv run nfl train --model baseline
+uv run nfl train --model baseline          # naive | xgb | mlp | seq | ensemble
 uv run nfl predict 2024_18_KC_DEN --at "Q4 05:00"
 uv run nfl evaluate --season 2024
+
+uv run nfl promote --candidate ensemble_v1 # gate, then move the PRODUCTION pointer
+uv run nfl promote --candidate ensemble_v1 --version 20260823T061500
+uv run nfl promote --candidate ensemble_v1 --floor naive_score_time --force
 ```
 
 Slash command: `/predict <game_id> [--at "Q4 05:00"]` wraps `uv run nfl predict`.
+
+### Promotion and the production pointer
+
+`nfl promote` is the only way a model becomes PRODUCTION. It runs the ADR 0003 §5
+gate — the candidate must **beat** the naive floor on val Q4@600/300/120 on both
+log-loss and Brier, and be **no worse** on the not-collapsed subset — printing the
+full comparison table either way, so a refused promotion says exactly which number
+refused it. Both sides are read from the `val_slices` recorded in each artifact's
+manifest at training time, so the gate compares numbers that were actually
+measured rather than re-deriving them from a dataset that may have moved.
+
+The not-collapsed subset is keyed on the **floor's** probability band `[0.15, 0.85]`
+so both sides are scored on the same rows; the per-model variant is reported
+alongside as `not_collapsed_own` and is never gated.
+
+On a pass it writes **`data/models/PRODUCTION.json`** — a pointer holding the
+`name`/`version`, the promotion timestamp, the git sha, the artifact's metrics
+and its dataset fingerprint. It is a pointer, not a copy: the artifact never
+moves, so a rollback is another one-line pointer write. `nfl predict` resolves
+`--model production` (its default) through that pointer, so promoting is what
+changes what the CLI serves. Roll back by promoting the previous version.
+`--force` promotes past a failed gate and says so in red; it exists for
+emergencies and leaves a loud line in the output.
 
 ## GPU notes (RTX 5080)
 

@@ -936,10 +936,14 @@ def _predict_with_confidence(
         components = {
             str(k): float(np.asarray(v, dtype=float).ravel()[0]) for k, v in parts.items()
         }
+        # Report the definition the ensemble actually chose, not a fixed label:
+        # the ledger's ``confidence_method`` is how a past prediction's number is
+        # interpreted, and "ensemble_spread" would be a lie for any other mode.
+        mode = str(getattr(model, "confidence_mode", "") or "ensemble_spread")
         return (
             float(np.asarray(probs, dtype=float).ravel()[0]),
             float(np.asarray(conf, dtype=float).ravel()[0]),
-            "ensemble_spread",
+            mode,
             components,
         )
     p = float(np.asarray(model.predict_proba(frame), dtype=float).ravel()[0])

@@ -336,8 +336,12 @@ def train_naive(
     model = ScoreTimeLogistic()
     result = model.fit(x_train, y_train, x_val, y_val)
 
+    # The floor is its own not-collapsed reference: the band the gate keys on
+    # *is* this model's band, so there is nothing to pass. Recording the pin
+    # anyway is what lets the gate check the two sides agree (ADR 0003 §5).
     val_table = slice_metrics(data.val, model.predict_proba(x_val), y_val)
     result.extra["val_slices"] = val_table.to_dicts()
+    result.extra["not_collapsed_reference"] = f"{model.name}/{result.version}"
     if data.test.height:
         x_test, y_test = data.as_xy("test")
         test_table = slice_metrics(data.test, model.predict_proba(x_test), y_test)
@@ -363,6 +367,7 @@ def train_naive(
                 "stride": stride,
                 "val_slices": result.extra.get("val_slices"),
                 "test_slices": result.extra.get("test_slices"),
+                "not_collapsed_reference": result.extra["not_collapsed_reference"],
             },
         )
         log.info("wrote %s", target)

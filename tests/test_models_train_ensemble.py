@@ -27,10 +27,11 @@ from nfl.models import registry
 from nfl.models.base import FitResult
 from nfl.models.data import ModelFrames
 from nfl.models.dummy import ConstantModel, NoisyOracle
-from nfl.models.ensemble import StackedEnsemble
+from nfl.models.ensemble import CONFIDENCE_MODES, StackedEnsemble
 from nfl.models.train_ensemble import (
     GATE_METRICS,
     GATE_Q4_SLICES,
+    NOT_COLLAPSED_OWN_SLICE,
     NOT_COLLAPSED_SLICE,
     RegistryMember,
     UncertainRegistryMember,
@@ -39,6 +40,7 @@ from nfl.models.train_ensemble import (
     member_context,
     promotion_gate,
     q4_row_indices,
+    reference_probabilities,
     split_member_spec,
     train_ensemble,
 )
@@ -243,6 +245,49 @@ def test_a_mismatched_row_context_is_an_error(stocked):
         ensemble.predict_proba(frame)
 
 
+class SeqLikeMCHead:
+    """A member whose MC head windows by game, exactly as ``tf_seq``'s does."""
+
+    name = "seq_like"
+
+    def __init__(self) -> None:
+        self.meta_seen_by_uncertainty: pl.DataFrame | None = None
+
+    def predict_proba(self, X: pl.DataFrame, meta: pl.DataFrame | None = None) -> np.ndarray:
+        return np.full(X.height, 0.5)
+
+    def predict_with_uncertainty(
+        self, X: pl.DataFrame, meta: pl.DataFrame | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        self.meta_seen_by_uncertainty = meta
+        return np.full(X.height, 0.5), np.full(X.height, 0.1)
+
+
+def test_the_mc_head_is_handed_the_same_context_the_point_estimate_gets(frames):
+    """Without it the GRU's σ would window across game boundaries."""
+    model = SeqLikeMCHead()
+    member = UncertainRegistryMember(member="seq_like", version="v0", model=model)
+    ensemble = StackedEnsemble([member])
+    X = frames.val.select(FEATURES)
+
+    with member_context(ensemble, frames.val):
+        ensemble.member_uncertainty(X)
+    seen = model.meta_seen_by_uncertainty
+    assert seen is not None
+    assert seen.height == frames.val.height
+    assert "meta__game_id" in seen.columns
+
+
+def test_a_member_whose_mc_head_takes_no_meta_is_not_handed_one(frames, stocked):
+    """``hasattr`` detection must not turn into a signature assumption."""
+    member = load_member("oracle0", root=stocked)
+    assert isinstance(member, UncertainRegistryMember)
+    ensemble = StackedEnsemble([member])
+    with member_context(ensemble, frames.val):
+        std = ensemble.member_uncertainty(frames.val.select(FEATURES))
+    assert std is not None and std.shape[0] == frames.val.height
+
+
 def test_the_context_is_released_after_the_block(stocked):
     member = load_member("oracle0", root=stocked)
     ensemble = StackedEnsemble([member])
@@ -346,21 +391,67 @@ def test_calibration_can_be_turned_off(frames, stocked, tmp_path):
     assert ensemble.calibrator is None
 
 
-def test_slices_cover_overall_q4_marks_and_not_collapsed(frames, stocked, tmp_path):
+def test_slices_cover_overall_q4_marks_and_both_not_collapsed_variants(frames, stocked, tmp_path):
     _, result = _train(frames, stocked, tmp_path)
     names = [row["slice"] for row in result.extra["val_slices"]]
-    assert names == ["overall", *GATE_Q4_SLICES, NOT_COLLAPSED_SLICE]
+    assert names == [
+        "overall",
+        *GATE_Q4_SLICES,
+        NOT_COLLAPSED_SLICE,
+        NOT_COLLAPSED_OWN_SLICE,
+    ]
     assert [row["slice"] for row in result.extra["test_slices"]] == names
 
 
 def test_the_confidence_definition_is_chosen_and_recorded(frames, stocked, tmp_path):
     _, result = _train(frames, stocked, tmp_path)
     mode = result.extra["confidence_mode"]
-    assert mode in {"disagreement", "uncertainty", "combined"}
+    assert mode in set(CONFIDENCE_MODES)
     ranked = result.extra["confidence_ranking"]
-    # Two of three members expose an MC head, so all three definitions compete.
-    assert {row["confidence"] for row in ranked} == {"disagreement", "mc_dropout", "blend"}
+    # Two of three members expose an MC head, so every definition competes:
+    # spread, MC σ, calibrated margin, and the two compounds.
+    assert {row["confidence"] for row in ranked} == {
+        "disagreement",
+        "mc_dropout",
+        "blend",
+        "margin",
+        "margin_mc",
+    }
     assert result.extra["confidence_n_val_q4_rows"] > 0
+
+
+def test_the_chosen_confidence_is_the_best_ranked_one(frames, stocked, tmp_path):
+    """The winner is the ranking's first row — most negative spearman wins."""
+    _, result = _train(frames, stocked, tmp_path)
+    labels = {
+        "disagreement": "disagreement",
+        "uncertainty": "mc_dropout",
+        "combined": "blend",
+        "margin": "margin",
+        "margin_uncertainty": "margin_mc",
+    }
+    ranked = result.extra["confidence_ranking"]
+    assert labels[result.extra["confidence_mode"]] == ranked[0]["confidence"]
+    spearmans = [row["spearman"] for row in ranked]
+    assert spearmans == sorted(spearmans)
+    assert result.extra["confidence_spearman"] == pytest.approx(ranked[0]["spearman"])
+
+
+def test_margin_confidence_needs_the_calibrated_probability(frames, stocked, tmp_path):
+    """A margin mode cannot invent ``p``; it says so rather than guessing."""
+    ensemble, _ = _train(frames, stocked, tmp_path)
+    ensemble.confidence_mode = "margin"
+    with pytest.raises(ValueError, match="calibrated probability"):
+        ensemble.confidence_from(np.array([[0.4, 0.6], [0.5, 0.5]]))
+
+
+def test_margin_confidence_is_the_distance_from_a_coin_flip(frames, stocked, tmp_path):
+    ensemble, _ = _train(frames, stocked, tmp_path)
+    ensemble.confidence_mode = "margin"
+    member_probs = np.array([[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]])
+    conf, signals = ensemble.confidence_from(member_probs, None, np.array([0.5, 0.75, 1.0]))
+    assert conf == pytest.approx([0.0, 0.5, 1.0])
+    assert signals["margin"] == pytest.approx([0.0, 0.5, 1.0])
 
 
 def test_a_forced_confidence_definition_wins(frames, stocked, tmp_path):
@@ -537,6 +628,66 @@ def test_the_gate_table_shows_both_sides_and_the_verdict(tmp_path):
     ]
     assert set(table.get_column("verdict").unique()) == {"pass"}
     assert (table.get_column("delta") < 0).all()
+
+
+def test_the_trainer_keys_not_collapsed_on_the_floors_band(frames, stocked, tmp_path):
+    """The gated slice counts the *floor's* live rows, not the ensemble's."""
+    _save(
+        NoisyOracle(sigma=0.9, scale_col="noise_scale", seed=9, name="naive_score_time"),
+        stocked,
+        "naive_score_time",
+        "20240101T000000",
+    )
+    _, result = _train(frames, stocked, tmp_path)
+
+    floor_p, pin = reference_probabilities(frames.val, frames.features, root=stocked)
+    expected = int(((floor_p >= 0.15) & (floor_p <= 0.85)).sum())
+    rows = {row["slice"]: row for row in result.extra["val_slices"]}
+    assert rows[NOT_COLLAPSED_SLICE]["n"] == expected
+    assert result.extra["not_collapsed_reference"] == pin == "naive_score_time/20240101T000000"
+    # The own-probability variant is still reported, and is a different sample.
+    assert rows[NOT_COLLAPSED_OWN_SLICE]["n"] != rows[NOT_COLLAPSED_SLICE]["n"]
+
+
+def test_candidate_and_floor_are_gated_on_the_same_row_count(frames, stocked, tmp_path):
+    """The floor's own band *is* the reference band, so both sides count alike."""
+    from nfl.models.metrics import slice_metrics
+
+    floor_model = NoisyOracle(sigma=0.9, scale_col="noise_scale", seed=9, name="naive_score_time")
+    floor_p = floor_model.predict_proba(frames.val.select(frames.features))
+    floor_table = slice_metrics(frames.val, floor_p, frames.val.get_column("label__home_win"))
+    _save(floor_model, stocked, "naive_score_time", "20240101T000000")
+
+    _, result = _train(frames, stocked, tmp_path)
+    candidate = {row["slice"]: row for row in result.extra["val_slices"]}
+    floor = {row["slice"]: row for row in floor_table.to_dicts()}
+    assert candidate[NOT_COLLAPSED_SLICE]["n"] == floor[NOT_COLLAPSED_SLICE]["n"]
+
+
+def test_reference_probabilities_falls_back_when_the_floor_is_missing(frames, stocked):
+    """A registry with no floor is a warning and a ``None``, never a crash."""
+    probs, pin = reference_probabilities(frames.val, frames.features, root=stocked)
+    assert probs is None
+    assert pin is None
+
+
+def test_the_gate_notes_a_candidate_scored_against_another_floor(tmp_path):
+    root = tmp_path / "models"
+    _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.55))
+    directory = registry.model_dir("cand", "20240102T000000", root)
+    manifest = json.loads((directory / "manifest.json").read_text())
+    manifest.setdefault("extra", {})["not_collapsed_reference"] = "naive_score_time/19990101T000000"
+    (directory / "manifest.json").write_text(json.dumps(manifest))
+
+    result = promotion_gate("cand", root=root)
+    assert any("19990101T000000" in note for note in result.notes)
+
+
+def test_the_gate_notes_a_candidate_that_recorded_no_reference(tmp_path):
+    root = tmp_path / "models"
+    _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.55))
+    result = promotion_gate("cand", root=root)
+    assert any("no not_collapsed_reference" in note for note in result.notes)
 
 
 def test_a_trained_ensemble_can_be_gated(frames, stocked, tmp_path):

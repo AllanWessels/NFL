@@ -75,7 +75,12 @@ from nfl.models.ensemble import (
     StackedEnsemble,
     compare_confidence_definitions,
 )
-from nfl.models.metrics import Q4_MARKS, slice_metrics
+from nfl.models.metrics import (
+    NOT_COLLAPSED_OWN_SLICE,
+    NOT_COLLAPSED_SLICE,
+    Q4_MARKS,
+    slice_metrics,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +90,7 @@ __all__ = [
     "GATE_Q4_SLICES",
     "MEMBER_ALIASES",
     "NAIVE_FLOOR",
+    "NOT_COLLAPSED_OWN_SLICE",
     "NOT_COLLAPSED_SLICE",
     "GateCheck",
     "GateResult",
@@ -94,6 +100,7 @@ __all__ = [
     "load_member",
     "member_context",
     "promotion_gate",
+    "reference_probabilities",
     "split_member_spec",
     "train_ensemble",
 ]
@@ -137,6 +144,8 @@ _CONFIDENCE_LABELS: dict[ConfidenceMode, str] = {
     "disagreement": "disagreement",
     "uncertainty": "mc_dropout",
     "combined": "blend",
+    "margin": "margin",
+    "margin_uncertainty": "margin_mc",
 }
 _CONFIDENCE_MODES: dict[str, ConfidenceMode] = {v: k for k, v in _CONFIDENCE_LABELS.items()}
 
@@ -145,7 +154,6 @@ NAIVE_FLOOR = "naive_score_time"
 
 #: Slice names as :func:`nfl.models.metrics.slice_metrics` writes them.
 GATE_Q4_SLICES: tuple[str, ...] = tuple(f"q4_{m}s" for m in Q4_MARKS)
-NOT_COLLAPSED_SLICE = "not_collapsed"
 
 #: Metrics the gate compares. Both must improve; a candidate that trades log
 #: loss for Brier is a candidate that moved probability mass around.
@@ -336,12 +344,12 @@ class RegistryMember:
             )
         return self.context
 
-    def _wants_context(self) -> bool:
+    def _wants_context(self, method: str = "predict_proba") -> bool:
         import inspect
 
         try:
-            params = inspect.signature(self.loaded.predict_proba).parameters
-        except (TypeError, ValueError):  # pragma: no cover - C callables
+            params = inspect.signature(getattr(self.loaded, method)).parameters
+        except (AttributeError, TypeError, ValueError):  # pragma: no cover - C callables
             return False
         return "meta" in params
 
@@ -420,7 +428,17 @@ class UncertainRegistryMember(RegistryMember):
     """
 
     def predict_with_uncertainty(self, X: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-        mean, std = self.loaded.predict_with_uncertainty(self._frame_for(X))
+        frame = self._frame_for(X)
+        # The GRU's MC head windows by game exactly as its point estimate does,
+        # so it needs the same bound context; a member that takes no ``meta``
+        # never sees one.
+        context = self._context_for(X)
+        model = self.loaded
+        mean, std = (
+            model.predict_with_uncertainty(frame, context)
+            if self._wants_context("predict_with_uncertainty")
+            else model.predict_with_uncertainty(frame)
+        )
         return (
             np.asarray(mean, dtype=float).ravel(),
             np.asarray(std, dtype=float).ravel(),
@@ -511,6 +529,38 @@ def load_member(name: str, version: str | None = None, root: Path | None = None)
     )
 
 
+def reference_probabilities(
+    frame: pl.DataFrame,
+    features: Sequence[str],
+    *,
+    floor: str = NAIVE_FLOOR,
+    version: str | None = None,
+    root: Path | None = None,
+) -> tuple[np.ndarray | None, str | None]:
+    """The floor model's probability on ``frame``, and the pin it came from.
+
+    This is what keys the ``not_collapsed`` slice (ADR 0003 §5): scoring the
+    candidate on *the floor's* live rows is what makes the two sides of the gate
+    the same population. Returns ``(None, None)`` — and logs why — when the
+    floor is not in the registry, which is the state of a fresh checkout and of
+    every test that has not trained one; callers then fall back to the model's
+    own band, and the gate says so.
+    """
+    try:
+        member = load_member(floor, version, root)
+    except (FileNotFoundError, ValueError) as exc:
+        log.warning(
+            "no floor artifact for the not-collapsed reference (%s); "
+            "the slice falls back to each model's own probability",
+            exc,
+        )
+        return None, None
+    X = design_matrix(frame, features)
+    with member_context(StackedEnsemble(members=[member]), frame):
+        probs = np.asarray(member.predict_proba(X), dtype=float).ravel()
+    return probs, f"{member.member}/{member.version}"
+
+
 # --------------------------------------------------------------------------- #
 # Clock / slicing helpers
 # --------------------------------------------------------------------------- #
@@ -564,25 +614,32 @@ def q4_row_indices(frame: pl.DataFrame, marks: Sequence[int] = Q4_MARKS) -> np.n
 
 
 def _confidence_candidates(
-    ensemble: StackedEnsemble, member_probs: np.ndarray, uncertainty: np.ndarray | None
+    ensemble: StackedEnsemble,
+    member_probs: np.ndarray,
+    uncertainty: np.ndarray | None,
+    p: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """One confidence vector per definition the members can actually support.
 
-    Member disagreement always exists. The MC-dropout definition and the blend
-    of the two only exist if some member exposes ``predict_with_uncertainty``;
-    with the ADR 0003 §3 membership (naive + XGBoost + GRU) none does, so the
-    ranking has one row. That is a fact worth seeing in the manifest — ADR §4
-    assumed the GRU carried an MC head, and it does not.
+    Member disagreement and calibrated margin always exist. The MC-dropout σ,
+    and the two compounds that use it, exist only if some member exposes
+    ``predict_with_uncertainty`` — since the GRU grew an MC head that is now the
+    ADR 0003 §3 membership's normal state, but an ensemble assembled from older
+    artifacts will still rank the two definitions it has and say so.
     """
     modes: list[ConfidenceMode] = ["disagreement"]
+    if p is not None:
+        modes.append("margin")
     if uncertainty is not None and np.asarray(uncertainty).size:
         modes += ["uncertainty", "combined"]
+        if p is not None:
+            modes.append("margin_uncertainty")
     saved = ensemble.confidence_mode
     out: dict[str, np.ndarray] = {}
     try:
         for mode in modes:
             ensemble.confidence_mode = mode
-            conf, _ = ensemble.confidence_from(member_probs, uncertainty)
+            conf, _ = ensemble.confidence_from(member_probs, uncertainty, p)
             out[_CONFIDENCE_LABELS[mode]] = conf
     finally:
         ensemble.confidence_mode = saved
@@ -604,8 +661,14 @@ def choose_confidence(
     ``rows`` is the Q4 subset (see :func:`q4_row_indices`): a definition that
     separates error across a whole season but not inside the last ten minutes is
     the wrong definition for this project, whatever its overall numbers say.
+
+    The ranking is by ``spearman`` — the rank correlation between a bin's
+    confidence and its Brier — ascending, so the winner is the most *negatively*
+    correlated: more confidence, less error. A definition whose correlation is
+    positive is worse than useless (it is confident exactly where it is wrong),
+    and :func:`train_ensemble` refuses to ship one.
     """
-    candidates = _confidence_candidates(ensemble, member_probs, uncertainty)
+    candidates = _confidence_candidates(ensemble, member_probs, uncertainty, p)
     forced: ConfidenceMode | None = None
     if requested is not None:
         named = _CONFIDENCE_MODES.get(requested, requested)
@@ -633,6 +696,14 @@ def choose_confidence(
     if forced is not None:
         return forced, table
     return _CONFIDENCE_MODES[str(table.get_column("confidence")[0])], table
+
+
+def _winning_spearman(ranking: pl.DataFrame, mode: ConfidenceMode) -> float | None:
+    """The chosen definition's rank correlation with Brier, if it was ranked."""
+    if "spearman" not in ranking.columns:
+        return None
+    row = ranking.filter(pl.col("confidence") == _CONFIDENCE_LABELS[mode])
+    return float(row.get_column("spearman")[0]) if row.height else None
 
 
 # --------------------------------------------------------------------------- #
@@ -663,7 +734,7 @@ def _score(
         uncertainty = ensemble.member_uncertainty(X)
     raw = ensemble.combine(member_probs)
     p = _apply_calibrator(ensemble.calibrator, raw, _clock(frame))
-    conf, _ = ensemble.confidence_from(member_probs, uncertainty)
+    conf, _ = ensemble.confidence_from(member_probs, uncertainty, p)
     return p, conf, member_probs, uncertainty
 
 
@@ -685,6 +756,8 @@ def train_ensemble(
     calibrator_base: str = "isotonic",
     phase_min_samples: int = 500,
     confidence: str | None = None,
+    floor: str = NAIVE_FLOOR,
+    floor_version: str | None = None,
     save: bool = True,
     report: bool = True,
 ) -> tuple[StackedEnsemble, FitResult]:
@@ -706,6 +779,9 @@ def train_ensemble(
         reports_root: data root the markdown report is written under.
         calibrator: calibrator kind; ``"phase_aware"`` per ADR 0003 §3.
         confidence: force a definition instead of choosing one empirically.
+        floor / floor_version: the model whose probability band keys the
+            ``not_collapsed`` slice, so the gate scores both sides on the same
+            rows. Defaults to the latest :data:`NAIVE_FLOOR`.
 
     Returns:
         The fitted ensemble and its :class:`~nfl.models.base.FitResult`, whose
@@ -752,23 +828,42 @@ def train_ensemble(
         ensemble, p_val, y_val, member_probs, uncertainty, q4_rows, requested=confidence
     )
     ensemble.confidence_mode = mode
-    conf_val, _ = ensemble.confidence_from(member_probs, uncertainty)
+    conf_val, _ = ensemble.confidence_from(member_probs, uncertainty, p_val)
     log.info("confidence definition: %s (%d val Q4 rows)", mode, q4_rows.size)
+    spearman = _winning_spearman(ranking, mode)
+    if spearman is not None and spearman >= 0.0:
+        log.warning(
+            "confidence %r has spearman %+.4f on val Q4 rows: it is not negatively "
+            "correlated with Brier, so it does not predict error. Shipping it anyway "
+            "would be publishing a number that means nothing (ADR 0003 §4).",
+            mode,
+            spearman,
+        )
+    result.extra["confidence_spearman"] = spearman
 
     # -- slices ------------------------------------------------------------ #
-    val_table = slice_metrics(data.val, p_val, y_val)
+    # ``not_collapsed`` is keyed on the floor's band, so the gate compares the
+    # candidate and the floor over one row set (ADR 0003 §5).
+    ref_val, ref_pin = reference_probabilities(
+        data.val, data.features, floor=floor, version=floor_version, root=models_root
+    )
+    val_table = slice_metrics(data.val, p_val, y_val, reference_probs=ref_val)
     result.extra["val_slices"] = val_table.to_dicts()
     p_test = conf_test = None
     test_table = None
     if data.test.height:
         y_test = labels(data.test)
         p_test, conf_test, _, _ = _score(ensemble, data.test, data.features)
-        test_table = slice_metrics(data.test, p_test, y_test)
+        ref_test, _ = reference_probabilities(
+            data.test, data.features, floor=floor, version=floor_version, root=models_root
+        )
+        test_table = slice_metrics(data.test, p_test, y_test, reference_probs=ref_test)
         result.extra["test_slices"] = test_table.to_dicts()
 
     result.extra.update(
         {
             "members": [m.pin for m in loaded],
+            "not_collapsed_reference": ref_pin,
             "confidence_mode": mode,
             "confidence_ranking": ranking.to_dicts(),
             "confidence_n_val_q4_rows": int(q4_rows.size),
@@ -802,6 +897,7 @@ def train_ensemble(
             test_table=test_table,
             ranking=ranking,
             members=loaded,
+            reference=ref_pin,
             reports_root=reports_root,
             models_root=models_root,
         )
@@ -849,6 +945,7 @@ def write_report(
     test_table: pl.DataFrame | None,
     ranking: pl.DataFrame,
     members: Sequence[RegistryMember],
+    reference: str | None = None,
     reports_root: Path | None = None,
     models_root: Path | None = None,
 ) -> Path:
@@ -858,9 +955,8 @@ def write_report(
     ledger-schema rows so an ensemble reads exactly like a logged season — the
     same slices, the same reliability table, the same definitions. The sections
     appended after it are the ones the ADR asks for specifically and evaluate
-    cannot produce: the not-collapsed slice on the model's own probability
-    (evaluate's version needs a market price, ADR 0001), the confidence ranking,
-    and the promotion gate.
+    cannot produce: the two not-collapsed slices (evaluate's version needs a
+    market price, ADR 0001), the confidence ranking, and the promotion gate.
     """
     from nfl.logging import evaluate as evaluate_mod
     from nfl.logging.backtest import backtest
@@ -904,12 +1000,14 @@ def write_report(
         + (f" weights `{[round(w, 4) for w in ensemble.weights]}`" if ensemble.weights else ""),
         f"- calibrator: `{getattr(ensemble.calibrator, 'kind', 'none')}` (fit on val)",
         f"- confidence: `{ensemble.confidence_mode}`",
+        f"- not-collapsed reference: `{reference or 'own probability'}`",
         "",
         "### Members",
         "",
         _md_table(pl.DataFrame([m.pin for m in members])),
         "",
-        "### Slices (model's own probability; not-collapsed per ADR 0001 placeholder)",
+        f"### Slices (`{NOT_COLLAPSED_SLICE}` on the floor's band, "
+        f"`{NOT_COLLAPSED_OWN_SLICE}` on this model's; ADR 0001 market join pending)",
         "",
         "**val**",
         "",
@@ -994,6 +1092,13 @@ def _val_slices(name: str, version: str, root: Path | None) -> dict[str, dict[st
     return {str(row["slice"]): row for row in recorded if isinstance(row, dict) and "slice" in row}
 
 
+def _reference_pin(name: str, version: str, root: Path | None) -> str | None:
+    """The floor pin a manifest's ``not_collapsed`` slice was keyed on, if recorded."""
+    manifest = registry.read_manifest(registry.model_dir(name, version, root))
+    pin = manifest.extra.get("not_collapsed_reference")
+    return str(pin) if pin else None
+
+
 def promotion_gate(
     candidate: str,
     version: str | None = None,
@@ -1010,6 +1115,13 @@ def promotion_gate(
     Both sides are read from the manifests written at training time, so the gate
     compares the numbers that were actually recorded rather than re-deriving
     them from a dataset that may have moved underneath.
+
+    The not-collapsed slice is keyed on the **floor's** probability band on both
+    sides, so the comparison is over one row set. The gate proves that rather
+    than assuming it: it checks the row counts match and that the candidate
+    recorded the same floor pin as the one being compared, and notes it loudly
+    when either says otherwise (a manifest written before this rule, or one
+    referenced against a floor that has since been retrained).
     """
     candidate_name = _registry_name(candidate, root)
     candidate_version = version or registry.latest(candidate_name, root)
@@ -1025,15 +1137,29 @@ def promotion_gate(
         notes.append("candidate is the floor; every comparison is a tie and therefore a failure")
 
     # Until the ledger carries Kalshi snapshots (ADR 0003 §6), "not collapsed"
-    # is defined on each model's *own* probability, so the two sides of this
-    # comparison are different rows. Say so when the counts prove it.
+    # stands in for the market filter with the *floor's* probability band. Both
+    # sides must therefore be the same rows; row counts are the cheap proof.
     cand_n = cand.get(NOT_COLLAPSED_SLICE, {}).get("n")
     floor_n = base.get(NOT_COLLAPSED_SLICE, {}).get("n")
     if cand_n is not None and floor_n is not None and int(cand_n) != int(floor_n):
         notes.append(
-            f"{NOT_COLLAPSED_SLICE} is keyed on each model's own probability, so the "
-            f"candidate is scored on {int(cand_n):,} rows and the floor on {int(floor_n):,}; "
-            "these are different populations until the market join lands (ADR 0003 §6)"
+            f"{NOT_COLLAPSED_SLICE} should be the floor's rows on both sides, but the "
+            f"candidate recorded {int(cand_n):,} and the floor {int(floor_n):,}; one of "
+            "these manifests predates the shared row set — retrain it before trusting "
+            "this row of the table (ADR 0003 §5)"
+        )
+    cand_ref = _reference_pin(candidate_name, candidate_version, root)
+    expected_ref = f"{floor_name}/{resolved_floor}"
+    if cand_ref is None:
+        notes.append(
+            f"{candidate_name}/{candidate_version} records no not_collapsed_reference; "
+            "it was scored on its own probability band, not the floor's"
+        )
+    elif cand_ref != expected_ref and candidate_name != floor_name:
+        notes.append(
+            f"{candidate_name}/{candidate_version} was scored against floor {cand_ref} but "
+            f"is being compared to {expected_ref}; re-fit it, or pass --floor-version "
+            f"{cand_ref.rpartition('/')[2]}"
         )
 
     wanted = [(s, True) for s in GATE_Q4_SLICES] + [(NOT_COLLAPSED_SLICE, False)]

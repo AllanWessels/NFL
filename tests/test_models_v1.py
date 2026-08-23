@@ -12,7 +12,7 @@ import polars as pl
 
 from nfl.models.v1 import SLICE_ORDER, promotion_gate, report_table
 
-_SLICES = ("q4_600s", "q4_300s", "q4_120s", "not_collapsed", "overall")
+_SLICES = ("q4_600s", "q4_300s", "q4_120s", "not_collapsed", "not_collapsed_own", "overall")
 
 
 def table(**models: dict[str, tuple[float, float]]) -> pl.DataFrame:

@@ -562,11 +562,21 @@ def train_xgboost(
     result.extra["feature_importance_gain"] = importance.head(top_k_importance).to_dicts()
     result.extra["group_importance_gain"] = model.group_importance().to_dicts()
 
-    val_table = slice_metrics(data.val, model.predict_proba(x_val), y_val)
+    # Key ``not_collapsed`` on the naive floor's band so this manifest is
+    # comparable to the floor's row for row (ADR 0003 §5). Imported here because
+    # the ensemble trainer is a layer above this one.
+    from nfl.models.train_ensemble import reference_probabilities
+
+    ref_val, ref_pin = reference_probabilities(data.val, features, root=models_root)
+    val_table = slice_metrics(data.val, model.predict_proba(x_val), y_val, reference_probs=ref_val)
     result.extra["val_slices"] = val_table.to_dicts()
+    result.extra["not_collapsed_reference"] = ref_pin
     if data.test.height:
         x_test, y_test = design_matrix(data.test, features), labels(data.test)
-        test_table = slice_metrics(data.test, model.predict_proba(x_test), y_test)
+        ref_test, _ = reference_probabilities(data.test, features, root=models_root)
+        test_table = slice_metrics(
+            data.test, model.predict_proba(x_test), y_test, reference_probs=ref_test
+        )
         result.extra["test_slices"] = test_table.to_dicts()
 
     if save:
@@ -598,6 +608,7 @@ def train_xgboost(
                 "group_importance_gain": result.extra["group_importance_gain"],
                 "val_slices": result.extra["val_slices"],
                 "test_slices": result.extra.get("test_slices"),
+                "not_collapsed_reference": result.extra["not_collapsed_reference"],
             },
         )
         log.info("wrote %s", target)
