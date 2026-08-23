@@ -35,4 +35,8 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Pytest
+        env:
+          COLUMNS: "200"
+          TERM: dumb
+          NO_COLOR: "1"
         run: uv run pytest
