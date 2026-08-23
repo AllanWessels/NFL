@@ -50,11 +50,16 @@ uv run mypy nfl                # type check (advisory for now)
 uv run pre-commit install      # enable git hooks once per clone
 
 uv run nfl ingest nflverse --seasons 2010-2025 [--tables pbp,schedules] [--force]
+uv run nfl ingest weather --seasons 2025   # --games-parquet defaults to the season partitions
 uv run nfl train --model baseline          # naive | xgb | mlp | seq | ensemble
+uv run nfl train --model xgb --split 2023/2024/2025   # pin the split; default rolls
 uv run nfl predict 2024_18_KC_DEN --at "Q4 05:00"
 uv run nfl predict "DAL@PHI" --season 2025 --week 1   # matchup / team / ticker / espn id
 uv run nfl predict Eagles                              # that team's game this week
 uv run nfl evaluate --season 2024
+
+uv run nfl retrain                         # the whole weekly loop, in order
+uv run nfl retrain --skip-ingest --dry-run # what it would do, without doing it
 
 uv run nfl promote --candidate ensemble_v1 # gate, then move the PRODUCTION pointer
 uv run nfl promote --candidate ensemble_v1 --version 20260823T061500
@@ -81,6 +86,13 @@ The not-collapsed subset is keyed on the **floor's** probability band `[0.15, 0.
 so both sides are scored on the same rows; the per-model variant is reported
 alongside as `not_collapsed_own` and is never gated.
 
+Because the splits roll, "the same val season" is a gate condition rather than an
+assumption: the `split` row FAILS when the candidate's manifest and the floor's
+record different boundaries. Retraining one member and not the others across a
+season rollover is exactly how a candidate ends up looking better than a floor it
+never shared a row with. An artifact old enough not to record its split gets a
+loud note instead — unprovable is not the same as mismatched.
+
 The gate's third condition is **serving parity**: 20 `(game, Q4 time)` snapshots
 from val are scored through `nfl predict` on the replay feed *and* through the
 offline dataset row for the same play, and every one must land within `0.02`.
@@ -97,6 +109,110 @@ moves, so a rollback is another one-line pointer write. `nfl predict` resolves
 changes what the CLI serves. Roll back by promoting the previous version.
 `--force` promotes past a failed gate and says so in red; it exists for
 emergencies and leaves a loud line in the output.
+
+## Retraining
+
+### Rolling season splits
+
+The split is **not** a pair of years someone typed once. `L` is the latest
+season whose **regular season has finished** on disk — every `game_type == "REG"`
+row for it carries a result — detected from the nflverse schedules by
+`nfl.features.splits.latest_complete_season`. From that:
+
+```
+train <= L-2      val = L-1      test = L
+```
+
+The newest complete season is the *test* set because it is the one nothing has
+been tuned against; the one before it is val, so the promotion gate always
+judges a model on the newest football it is allowed to have seen. A season still
+being played is never eligible — its unplayed games have null results, so it
+cannot be `L`. Pinning 2022/2023/2024 forever means that the moment 2024 ends,
+"test" silently becomes two seasons and val stops being the most recent thing
+anyone measured.
+
+Resolution order for the default (`nfl.features.splits.default_split`):
+
+1. the `NFL_SEASON_SPLIT` environment variable, a `SeasonSplit.parse` spec
+   (`"2023/2024/2025"`, `"rolling:2025"`, or a bare `"2025"`) — the test suite
+   pins this so fixture datasets are not re-cut by whatever is in `data/raw`;
+2. `SeasonSplit.rolling(latest_complete_season())`;
+3. `FALLBACK_SPLIT` (2022/2023/2024) when there are no schedules on disk at all.
+
+`--split` on `nfl train` and `nfl retrain` overrides it per run. **Whichever
+split is used is written into every artifact's manifest**, and the promotion
+gate has a `split` row that FAILS when the candidate and the floor were
+validated on different seasons: two models measured on different football cannot
+be subtracted from one another.
+
+### `nfl retrain`
+
+One command, ten steps, in the only order that works — each consumes what the
+one before it wrote:
+
+| # | step | notes |
+|---|---|---|
+| 1 | `ingest nflverse` | current season, idempotent; `--skip-ingest` drops it |
+| 2 | `ingest weather` | needs the schedules from step 1 |
+| 3 | `features build` | **all** seasons — the rolling boundaries moved |
+| 4 | `train naive` | the floor first: its band keys `not_collapsed` for the rest |
+| 5 | `train xgb` | `servable`, sweep-best params read back from the latest manifest |
+| 6 | `train seq` | `servable`, likewise (`hyperparams` in the manifest) |
+| 7 | `train ensemble` | `logit_mean` + phase-aware isotonic |
+| 8 | `promote` | the ADR 0003 §5 gate. **Never `--force` from here** |
+| 9 | `ledger resolve` | fill outcomes for games that finished |
+| 10 | `evaluate --ledger` | score the ledger, take the drift reading |
+
+Flags: `--season`, `--split`, `--skip-ingest`, `--dry-run`, `--parity-samples`.
+
+Two kinds of not-succeeding, deliberately different. A step that **raises** stops
+the chain there — everything downstream would be reading stale or absent inputs.
+A gate that **refuses** does not: the chain continues into ledger resolve and
+evaluate, because those describe the model *already in production*, which is
+still the one being served and is exactly what you want to read when a candidate
+has just failed to replace it. The command exits non-zero either way.
+
+Every step is timed, and the run — steps, timings, summary, full gate table — is
+written to `data/reports/retrain-<timestamp>.md` whether it succeeded or not.
+The closing summary answers three questions: **gate result**, **PRODUCTION
+pointer**, **drift flag**.
+
+### Drift thresholds
+
+`nfl.logging.evaluate.retrain_trigger` compares recent realised log loss against
+what the artifact recorded at training time. Both `nfl evaluate --ledger` and the
+retrain summary print it.
+
+| knob | default | meaning |
+|---|---|---|
+| `--window` | **500** | most-recent *resolved* predictions scored |
+| `--drift-threshold` | **0.02** | absolute log-loss increase that flags `RETRAIN` |
+| `--baseline-log-loss` | from the manifest | the training-time number to compare against |
+
+The threshold is **absolute, not a ratio**: log loss is already on a log scale,
+so 0.02 nats means the same regression whether the baseline is 0.15 or 0.45. The
+baseline is read from each model version's own manifest, so the flag shows up
+without anyone having to remember a number — a warning nobody sees by default is
+not a warning. A version with no baseline on record gets a loud "no baseline"
+line rather than a fabricated signal. The trigger **flags only**; it never
+retrains anything.
+
+### Weekly schedule
+
+```bash
+scripts/weekly_retrain.sh            # runs `uv run nfl retrain` from the repo root
+                                     # log -> data/logs/retrain-<UTC stamp>.log
+scripts/install_cron.sh              # print the crontab entry it would install
+scripts/install_cron.sh --install    # install it (Tuesday 06:00 local)
+scripts/install_cron.sh --remove     # take it out again
+```
+
+Tuesday 06:00 **local** is the slot: Monday Night Football has finished,
+nflverse has published the week, and there are six days left to notice that the
+gate refused. `NFL_CRON_SCHEDULE` overrides the cron expression. Installing is
+idempotent — the entry carries a marker comment and an existing one is replaced,
+not duplicated. The wrapper resolves the repo root from its own path (cron starts
+in `$HOME`) and puts `~/.local/bin` on `PATH` (cron's `PATH` has no `uv`).
 
 ## GPU notes (RTX 5080)
 
@@ -143,16 +259,20 @@ NFL/
     ARCHITECTURE.md            # pipeline + model design
     DATA_MODEL.md              # exhaustive entity/attribute spec
     ADR/                       # architecture decision records
+  scripts/
+    weekly_retrain.sh          # cron entrypoint for `nfl retrain`
+    install_cron.sh            # installs the Tuesday 06:00 crontab entry
   nfl/
     __init__.py
-    cli.py                     # typer app: ingest / train / predict / evaluate
+    cli.py                     # typer app: ingest / train / retrain / predict / evaluate
+    retrain.py                 # the weekly chain, its timings and its run log
     data/                      # ingest adapters + pydantic schemas
     features/                  # pre-game & in-game feature builders
     models/                    # baselines, gbdt, tf nets, ensemble, calibration
     inference/                 # predict(game_id, at) entrypoint
     logging/                   # prediction ledger (parquet/duckdb), metrics
   tests/
-  data/                        # gitignored: raw/, processed/
+  data/                        # gitignored: raw/, processed/, reports/, logs/
   models/                      # gitignored: trained artifacts
 ```
 

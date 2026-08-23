@@ -8,12 +8,16 @@ import pytest
 from nfl.features import splits as splits_mod
 from nfl.features.assemble import assemble_dataset
 from nfl.features.splits import (
-    DEFAULT_SPLIT,
+    FALLBACK_SPLIT,
+    SPLIT_ENV_VAR,
     SeasonSplit,
     add_split_column,
+    default_split,
+    latest_complete_season,
     not_collapsed,
     q4_at,
     q4_window,
+    resolve_split,
     split_frames,
     train_frame,
     val_frame,
@@ -82,7 +86,128 @@ def test_split_works_on_a_raw_frame_without_the_meta_prefix() -> None:
 
 def test_missing_season_column_raises() -> None:
     with pytest.raises(KeyError, match="meta__season"):
-        train_frame(pl.DataFrame({"x": [1]}), DEFAULT_SPLIT)
+        train_frame(pl.DataFrame({"x": [1]}), FALLBACK_SPLIT)
+
+
+# --------------------------------------------------------------------------- #
+# Rolling splits
+# --------------------------------------------------------------------------- #
+
+
+def _schedule(rows: list[tuple[int, str, int | None]]) -> pl.DataFrame:
+    """``(season, game_type, result)`` rows as an nflverse-shaped schedule."""
+    return pl.DataFrame(
+        {
+            "season": [r[0] for r in rows],
+            "game_type": [r[1] for r in rows],
+            "result": [r[2] for r in rows],
+        },
+        schema={"season": pl.Int32, "game_type": pl.String, "result": pl.Int32},
+    )
+
+
+def test_rolling_holds_out_the_two_newest_seasons() -> None:
+    split = SeasonSplit.rolling(2025)
+    assert (split.train_through, split.val_season, split.test_from) == (2023, 2024, 2025)
+
+
+def test_rolling_split_frames_put_each_season_where_the_window_says() -> None:
+    frame = pl.DataFrame({"meta__season": [2019, 2023, 2024, 2025]})
+    train, val, test = split_frames(frame, SeasonSplit.rolling(2025))
+    assert train.get_column("meta__season").to_list() == [2019, 2023]
+    assert val.get_column("meta__season").to_list() == [2024]
+    assert test.get_column("meta__season").to_list() == [2025]
+
+
+def test_latest_complete_season_is_the_newest_finished_regular_season() -> None:
+    schedules = _schedule(
+        [(2023, "REG", 3), (2024, "REG", -7), (2024, "REG", 1), (2025, "REG", 10)]
+    )
+    assert latest_complete_season(schedules) == 2025
+
+
+def test_a_season_still_being_played_is_not_complete() -> None:
+    """The whole point: a half-finished season must never become val or test."""
+    schedules = _schedule([(2024, "REG", 3), (2025, "REG", 7), (2025, "REG", None)])
+    assert latest_complete_season(schedules) == 2024
+
+
+def test_unplayed_playoffs_do_not_hold_a_season_back() -> None:
+    """The regular season is what dates the split; January is not worth waiting for."""
+    schedules = _schedule([(2025, "REG", 3), (2025, "REG", 7), (2025, "SB", None)])
+    assert latest_complete_season(schedules) == 2025
+
+
+def test_latest_complete_season_is_none_without_a_usable_schedule() -> None:
+    assert latest_complete_season(pl.DataFrame({"nothing": [1]})) is None
+    assert latest_complete_season(_schedule([(2025, "REG", None)])) is None
+
+
+def test_default_split_reads_the_schedules_on_disk(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(SPLIT_ENV_VAR, raising=False)
+    splits_mod.clear_split_cache()
+    partition = tmp_path / "nflverse" / "schedules" / "season=2025"
+    partition.mkdir(parents=True)
+    _schedule([(2024, "REG", 1), (2025, "REG", 3)]).write_parquet(partition / "part-0.parquet")
+
+    assert default_split(tmp_path) == SeasonSplit.rolling(2025)
+
+
+def test_default_split_falls_back_when_there_are_no_schedules(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(SPLIT_ENV_VAR, raising=False)
+    splits_mod.clear_split_cache()
+    assert default_split(tmp_path / "empty") == FALLBACK_SPLIT
+
+
+def test_the_environment_variable_pins_the_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(SPLIT_ENV_VAR, "2019/2020/2021")
+    assert default_split() == SeasonSplit(2019, 2020, 2021)
+
+
+def test_a_bad_pin_says_so_rather_than_silently_rolling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SPLIT_ENV_VAR, "last-tuesday")
+    with pytest.raises(ValueError, match=SPLIT_ENV_VAR):
+        default_split()
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("2019/2020/2021", SeasonSplit(2019, 2020, 2021)),
+        ("2019,2020,2021", SeasonSplit(2019, 2020, 2021)),
+        ("rolling:2025", SeasonSplit(2023, 2024, 2025)),
+        ("2025", SeasonSplit(2023, 2024, 2025)),
+    ],
+)
+def test_split_specs_parse(spec: str, expected: SeasonSplit) -> None:
+    assert SeasonSplit.parse(spec) == expected
+
+
+@pytest.mark.parametrize("spec", ["", "rolling", "2020/2021", "2020/2021/2022/2023"])
+def test_bad_split_specs_are_rejected(spec: str) -> None:
+    with pytest.raises(ValueError):
+        SeasonSplit.parse(spec)
+
+
+def test_resolve_split_prefers_what_it_is_given() -> None:
+    explicit = SeasonSplit(2015, 2016, 2017)
+    assert resolve_split(explicit) is explicit
+    assert resolve_split("rolling:2025") == SeasonSplit.rolling(2025)
+    assert resolve_split(None) == SeasonSplit(2022, 2023, 2024)  # the conftest pin
+
+
+def test_a_split_round_trips_through_a_manifest_payload() -> None:
+    split = SeasonSplit.rolling(2025)
+    assert SeasonSplit.from_dict(split.to_dict()) == split
+    assert SeasonSplit.from_dict({"train_through": 2023}) is None
+    assert SeasonSplit.from_dict("nope") is None
+    assert split.label == "<=2023/2024/2025+"
 
 
 # --------------------------------------------------------------------------- #

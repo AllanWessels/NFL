@@ -26,6 +26,24 @@ import pytest
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def pinned_season_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the season split for every test that does not ask for another one.
+
+    The real default *rolls*: it is dated from whatever nflverse schedules are
+    sitting in ``data/raw``, so an un-pinned suite would cut the fixture
+    datasets differently on a machine that has ingested a new season than on
+    CI, which has ingested nothing. Pinning it to the historical
+    2022/2023/2024 boundaries keeps every fixture's train/val/test membership a
+    property of the fixture. Tests that exercise the rolling behaviour delete
+    this variable themselves.
+    """
+    from nfl.features import splits as splits_mod
+
+    monkeypatch.setenv(splits_mod.SPLIT_ENV_VAR, "2022/2023/2024")
+    splits_mod.clear_split_cache()
+
+
 @pytest.fixture(scope="session")
 def schedules_fixture() -> pl.DataFrame:
     """The 9-game, 46-column schedules fixture, betting columns included."""

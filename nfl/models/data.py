@@ -15,14 +15,14 @@ feature-group ablation in :mod:`nfl.models.gbdt` affordable.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 
 from nfl.features.assemble import LABEL_COLUMN, feature_columns, read_dataset
-from nfl.features.splits import DEFAULT_SPLIT, SeasonSplit, split_frames
+from nfl.features.splits import SeasonSplit, default_split, resolve_split, split_frames
 from nfl.models.artifacts import assert_model_input_frame
 
 __all__ = ["ModelFrames", "design_matrix", "labels", "load_model_frames", "seasons_in"]
@@ -41,7 +41,10 @@ class ModelFrames:
     val: pl.DataFrame
     test: pl.DataFrame
     features: list[str]
-    split: SeasonSplit = DEFAULT_SPLIT
+    #: The split these frames were cut on. Recorded rather than assumed: a
+    #: manifest that does not say which seasons were val cannot be gated
+    #: against another one (ADR 0003 §5).
+    split: SeasonSplit = field(default_factory=default_split)
 
     def as_xy(self, which: str) -> tuple[pl.DataFrame, np.ndarray]:
         """``(X, y)`` for ``"train"`` / ``"val"`` / ``"test"``."""
@@ -74,7 +77,7 @@ def seasons_in(df: pl.DataFrame) -> list[int]:
 def load_model_frames(
     seasons: str | int | Sequence[int] | None = None,
     *,
-    split: SeasonSplit = DEFAULT_SPLIT,
+    split: SeasonSplit | None = None,
     root: Path | None = None,
     stride: int = 1,
     drop_string_features: bool = False,
@@ -83,7 +86,10 @@ def load_model_frames(
 
     Args:
         seasons: restrict the read (``None`` reads everything on disk).
-        split: which seasons go where; defaults to train <=2022 / val 2023 / test 2024+.
+        split: which seasons go where. ``None`` resolves
+            :func:`~nfl.features.splits.default_split` — the rolling
+            train <= L-2 / val L-1 / test L window, dated from the schedules on
+            disk — and the resolved value is recorded on the returned frames.
         root: dataset root override, for tests.
         stride: keep every ``stride``-th play (1 = all rows). Applied to the
             training frame only — val and test stay whole so the reported
@@ -93,6 +99,7 @@ def load_model_frames(
     """
     if stride < 1:
         raise ValueError(f"stride must be >= 1; got {stride}")
+    split = resolve_split(split)
     df = read_dataset(seasons, root=root)
     df = df.filter(pl.col(LABEL_COLUMN).is_not_null())
     feats = feature_columns(df)

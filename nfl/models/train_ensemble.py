@@ -63,7 +63,7 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 
-from nfl.features.splits import SeasonSplit, q4_at
+from nfl.features.splits import SeasonSplit, q4_at, resolve_split
 from nfl.models import registry
 from nfl.models.base import FitResult
 from nfl.models.calibration import Calibrator, make_calibrator
@@ -771,8 +771,7 @@ def train_ensemble(
     *,
     versions: Mapping[str, str] | None = None,
     seasons: str | int | Sequence[int] | None = None,
-    train_through: int = 2022,
-    val_season: int = 2023,
+    split: SeasonSplit | str | None = None,
     frames: ModelFrames | None = None,
     root: Path | None = None,
     models_root: Path | None = None,
@@ -799,8 +798,12 @@ def train_ensemble(
             pinned as ``"name:version"``.
         meta: ``"logit_mean"`` (the ADR default) or ``"logistic_stacker"``.
         versions: pin specific member versions, ``{member_name: version}``.
-        seasons / train_through / val_season / stride / root: dataset selection,
-            as :func:`nfl.models.data.load_model_frames` takes them.
+        seasons / split / stride / root: dataset selection, as
+            :func:`nfl.models.data.load_model_frames` takes them. ``split``
+            defaults to the rolling window
+            (:func:`~nfl.features.splits.default_split`) and is recorded in the
+            manifest, so the promotion gate can prove the candidate and the
+            floor were cut the same way.
         frames: pre-loaded splits, skipping the dataset read (tests).
         models_root: registry root; ``None`` is ``data/models``.
         reports_root: data root the markdown report is written under.
@@ -815,14 +818,12 @@ def train_ensemble(
         ``extra`` carries the member pins, the confidence ranking and the val /
         test slice tables — the same numbers the promotion gate reads back.
     """
-    split = SeasonSplit(
-        train_through=train_through, val_season=val_season, test_from=val_season + 1
-    )
-    data = frames or load_model_frames(seasons, split=split, root=root, stride=stride)
+    resolved_split = resolve_split(split)
+    data = frames or load_model_frames(seasons, split=resolved_split, root=root, stride=stride)
     if data.val.is_empty():
         raise ValueError(
-            f"no validation rows for season {val_season}; the meta-learner and the "
-            "calibrator are fit on val, so there is nothing to fit"
+            f"no validation rows for season {data.split.val_season}; the meta-learner "
+            "and the calibrator are fit on val, so there is nothing to fit"
         )
 
     pinned = dict(versions or {})
@@ -890,6 +891,7 @@ def train_ensemble(
     result.extra.update(
         {
             "members": [m.pin for m in loaded],
+            "split": data.split.to_dict(),
             "not_collapsed_reference": ref_pin,
             "confidence_mode": mode,
             "confidence_ranking": ranking.to_dicts(),
@@ -1084,11 +1086,20 @@ class GateCheck:
     #: it only has to be no worse.
     strict: bool
     passed: bool
+    #: What the check demands, for the printed table. Empty means "derive it
+    #: from ``strict``"; the split check overrides it because "not worse" is
+    #: nonsense applied to a season number.
+    rule: str = ""
 
     @property
     def delta(self) -> float:
         """Candidate minus floor. Negative is an improvement (lower is better)."""
         return self.candidate - self.floor
+
+    @property
+    def rule_label(self) -> str:
+        """``"must beat"`` / ``"not worse"``, or whatever ``rule`` overrides it with."""
+        return self.rule or ("must beat" if self.strict else "not worse")
 
 
 @dataclass(frozen=True)
@@ -1126,6 +1137,17 @@ def _reference_pin(name: str, version: str, root: Path | None) -> str | None:
     manifest = registry.read_manifest(registry.model_dir(name, version, root))
     pin = manifest.extra.get("not_collapsed_reference")
     return str(pin) if pin else None
+
+
+def _recorded_split(name: str, version: str, root: Path | None) -> SeasonSplit | None:
+    """The season split a manifest says it was trained on, if it says.
+
+    Artifacts written before the split was recorded return ``None``; the gate
+    notes that rather than failing, because an unprovable split is not the same
+    as a mismatched one.
+    """
+    manifest = registry.read_manifest(registry.model_dir(name, version, root))
+    return SeasonSplit.from_dict(manifest.extra.get("split"))
 
 
 @dataclass(frozen=True)
@@ -1330,6 +1352,12 @@ def promotion_gate(
     compares the numbers that were actually recorded rather than re-deriving
     them from a dataset that may have moved underneath.
 
+    Because the splits roll, "the same val season" is a condition rather than an
+    assumption: the ``split`` row of the table fails when the two manifests were
+    validated on different seasons. Retraining one member and not the others
+    across a season boundary is exactly how a candidate ends up looking better
+    than a floor it never shared a row with.
+
     The not-collapsed slice is keyed on the **floor's** probability band on both
     sides, so the comparison is over one row set. The gate proves that rather
     than assuming it: it checks the row counts match and that the candidate
@@ -1358,6 +1386,46 @@ def promotion_gate(
     notes: list[str] = []
     if candidate_name == floor_name and candidate_version == resolved_floor:
         notes.append("candidate is the floor; every comparison is a tie and therefore a failure")
+
+    # Every number below is a *val* number. Two models validated on different
+    # seasons are two models measured on different football, and subtracting one
+    # from the other says nothing at all — so the split is a gate condition, not
+    # a footnote (ADR 0003 §5, rolling splits).
+    cand_split = _recorded_split(candidate_name, candidate_version, root)
+    floor_split = _recorded_split(floor_name, resolved_floor, root)
+    if cand_split is None or floor_split is None:
+        missing = [
+            f"{n}/{v}"
+            for n, v, s in (
+                (candidate_name, candidate_version, cand_split),
+                (floor_name, resolved_floor, floor_split),
+            )
+            if s is None
+        ]
+        notes.append(
+            f"no season split recorded by {', '.join(missing)}; the comparison assumes "
+            "both sides were validated on the same season and cannot prove it — "
+            "retrain so the manifest carries its split"
+        )
+    else:
+        same_split = cand_split == floor_split
+        if not same_split:
+            notes.append(
+                f"candidate was validated on {cand_split.label} and the floor on "
+                f"{floor_split.label}; these are different rows, so every delta below "
+                "is meaningless — retrain both on one split"
+            )
+        checks.append(
+            GateCheck(
+                slice="split",
+                metric="val_season",
+                candidate=float(cand_split.val_season),
+                floor=float(floor_split.val_season),
+                strict=False,
+                passed=same_split,
+                rule="same split",
+            )
+        )
 
     # Until the ledger carries Kalshi snapshots (ADR 0003 §6), "not collapsed"
     # stands in for the market filter with the *floor's* probability band. Both
@@ -1479,7 +1547,7 @@ def gate_table(result: GateResult) -> pl.DataFrame:
                 "candidate": c.candidate,
                 "floor": c.floor,
                 "delta": c.delta,
-                "rule": "must beat" if c.strict else "not worse",
+                "rule": c.rule_label,
                 "verdict": "pass" if c.passed else "FAIL",
             }
             for c in result.checks

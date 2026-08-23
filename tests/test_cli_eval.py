@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from nfl.cli import app
+from nfl.features.splits import SeasonSplit
 from nfl.logging import ledger as ledger_mod
 
 runner = CliRunner()
@@ -92,8 +93,8 @@ def test_train_dispatches_to_the_sibling_trainer(monkeypatch: pytest.MonkeyPatch
 
     module = types.ModuleType("nfl.models.naive")
 
-    def train_naive(seasons=None, train_through=2022, val_season=2023):  # type: ignore[no-untyped-def]
-        calls.append({"seasons": seasons, "train_through": train_through, "val_season": val_season})
+    def train_naive(seasons=None, split=None):  # type: ignore[no-untyped-def]
+        calls.append({"seasons": seasons, "split": split})
         return Result()
 
     module.train_naive = train_naive  # type: ignore[attr-defined]
@@ -101,7 +102,9 @@ def test_train_dispatches_to_the_sibling_trainer(monkeypatch: pytest.MonkeyPatch
 
     result = invoke("train", "--model", "naive", "--seasons", "2018-2020")
     assert result.exit_code == 0, result.output
-    assert calls == [{"seasons": [2018, 2019, 2020], "train_through": 2022, "val_season": 2023}]
+    # The split is resolved by the CLI and handed over whole, so the trainer
+    # records the same boundaries the manifest will claim.
+    assert calls == [{"seasons": [2018, 2019, 2020], "split": SeasonSplit(2022, 2023, 2024)}]
     assert "trained" in result.output
     assert "20240101T000000" in result.output
     assert "log_loss" in result.output
@@ -124,16 +127,32 @@ def test_train_only_passes_arguments_the_trainer_accepts(
     seen: list[object] = []
     module = types.ModuleType("nfl.models.gbdt")
 
-    def train_gbdt(seasons=None):  # type: ignore[no-untyped-def]
+    def train_xgboost(seasons=None):  # type: ignore[no-untyped-def]
         seen.append(seasons)
         return "ok"
 
-    module.train_gbdt = train_gbdt  # type: ignore[attr-defined]
+    module.train_xgboost = train_xgboost  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "nfl.models.gbdt", module)
 
-    result = invoke("train", "--model", "xgb", "--seasons", "2024", "--val-season", "2023")
+    result = invoke("train", "--model", "xgb", "--seasons", "2024", "--split", "2019/2020/2021")
     assert result.exit_code == 0, result.output
     assert seen == [[2024]]
+
+
+def test_train_xgb_names_the_entrypoint_that_actually_exists() -> None:
+    """``--model xgb`` must dispatch to a function ``nfl.models.gbdt`` defines."""
+    import nfl.models.gbdt as gbdt_mod
+    from nfl.cli import TRAINERS
+
+    module_name, func_name = TRAINERS["xgb"]
+    assert module_name == gbdt_mod.__name__
+    assert callable(getattr(gbdt_mod, func_name))
+
+
+def test_train_rejects_a_malformed_split() -> None:
+    result = invoke("train", "--model", "naive", "--split", "last-tuesday")
+    assert result.exit_code != 0
+    assert "--split" in result.output
 
 
 def test_train_reports_a_module_missing_its_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,7 +169,7 @@ def test_train_passes_ensemble_only_options_through(monkeypatch: pytest.MonkeyPa
     seen: list[dict[str, object]] = []
     module = types.ModuleType("nfl.models.train_ensemble")
 
-    def train_ensemble(members=None, meta=None, seasons=None, train_through=2022, val_season=2023):  # type: ignore[no-untyped-def]
+    def train_ensemble(members=None, meta=None, seasons=None, split=None):  # type: ignore[no-untyped-def]
         seen.append({"members": members, "meta": meta})
         return "ok"
 

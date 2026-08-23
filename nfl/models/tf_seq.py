@@ -50,7 +50,7 @@ import numpy as np
 import polars as pl
 
 from nfl.features.assemble import feature_columns
-from nfl.features.splits import DEFAULT_SPLIT, SeasonSplit
+from nfl.features.splits import SeasonSplit, resolve_split
 from nfl.models.base import FitResult
 from nfl.models.feature_sets import feature_set_columns
 from nfl.models.game_aware import (
@@ -756,7 +756,7 @@ SEQ_META_COLUMNS = ("meta__game_id", "meta__play_id")
 def train_tf_seq(
     seasons: Sequence[int] | None = None,
     *,
-    split: SeasonSplit = DEFAULT_SPLIT,
+    split: SeasonSplit | None = None,
     root: Path | None = None,
     models_root: Path | None = None,
     save: bool = True,
@@ -770,6 +770,7 @@ def train_tf_seq(
     per-play channels can be derived; the *tabular branch* is what the feature
     set narrows.
     """
+    split = resolve_split(split)
     train, val, _ = read_modelling_frames(seasons, split=split, root=root)
     if train.is_empty():
         raise ValueError("no training rows; run `nfl features build` first")
@@ -787,6 +788,7 @@ def train_tf_seq(
         val_selection=q4_selection(val) if model.selection_metric == "q4" else None,
     )
     result.extra["weight_by_game"] = weight_by_game
+    result.extra["split"] = split.to_dict()
     train_seasons = sorted(train.get_column("meta__season").unique().to_list())
     if save:
         directory = model_dir(model.name, result.version, root=models_root)

@@ -48,6 +48,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from nfl.features.splits import SeasonSplit
 from nfl.models.artifacts import assert_model_input_frame, model_dir, new_version, write_manifest
 from nfl.models.base import FitResult
 from nfl.models.data import ModelFrames, design_matrix, labels, load_model_frames
@@ -541,6 +542,7 @@ def train_xgboost(
     seasons: str | int | Sequence[int] | None = None,
     *,
     frames: ModelFrames | None = None,
+    split: SeasonSplit | None = None,
     root: Path | None = None,
     models_root: Path | None = None,
     stride: int = 1,
@@ -566,7 +568,11 @@ def train_xgboost(
     Q4 marks. The ADR 0003 v1 configuration is
     ``feature_set="v1", weight_by_game=True, selection_metric="q4"``.
     """
-    data = frames if frames is not None else load_model_frames(seasons, root=root, stride=stride)
+    data = (
+        frames
+        if frames is not None
+        else load_model_frames(seasons, split=split, root=root, stride=stride)
+    )
     features = feature_set_columns(data.train, feature_set)
     x_train, y_train = design_matrix(data.train, features), labels(data.train)
     x_val, y_val = design_matrix(data.val, features), labels(data.val)
@@ -603,6 +609,7 @@ def train_xgboost(
     ref_val, ref_pin = reference_probabilities(data.val, features, root=models_root)
     val_table = slice_metrics(data.val, model.predict_proba(x_val), y_val, reference_probs=ref_val)
     result.extra["val_slices"] = val_table.to_dicts()
+    result.extra["split"] = data.split.to_dict()
     result.extra["not_collapsed_reference"] = ref_pin
     if data.test.height:
         x_test, y_test = design_matrix(data.test, features), labels(data.test)
@@ -636,6 +643,7 @@ def train_xgboost(
                 "n_trees": result.extra["n_trees"],
                 "fit_seconds": result.extra["fit_seconds"],
                 "stride": stride,
+                "split": result.extra["split"],
                 "dropped_string_features": result.extra["dropped_string_features"],
                 "feature_importance_gain": result.extra["feature_importance_gain"],
                 "group_importance_gain": result.extra["group_importance_gain"],

@@ -41,6 +41,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from nfl.features.splits import SeasonSplit
 from nfl.models.artifacts import assert_model_input_frame, model_dir, new_version, write_manifest
 from nfl.models.base import FitResult
 from nfl.models.data import ModelFrames, load_model_frames
@@ -319,6 +320,7 @@ def train_naive(
     seasons: str | int | Sequence[int] | None = None,
     *,
     frames: ModelFrames | None = None,
+    split: SeasonSplit | None = None,
     root: Path | None = None,
     models_root: Path | None = None,
     stride: int = 1,
@@ -326,10 +328,19 @@ def train_naive(
 ) -> tuple[ScoreTimeLogistic, FitResult]:
     """Train :class:`ScoreTimeLogistic` on the assembled dataset and save it.
 
+    ``split`` defaults to :func:`~nfl.features.splits.default_split` — the
+    rolling window — and lands in the manifest, because the gate compares this
+    model's val slices against a candidate's and that is only meaningful if
+    both were cut the same way.
+
     Returns the fitted model and its :class:`~nfl.models.base.FitResult`; the
     result's ``extra`` carries the val and test slice tables as dictionaries.
     """
-    data = frames if frames is not None else load_model_frames(seasons, root=root, stride=stride)
+    data = (
+        frames
+        if frames is not None
+        else load_model_frames(seasons, split=split, root=root, stride=stride)
+    )
     x_train, y_train = data.as_xy("train")
     x_val, y_val = data.as_xy("val")
 
@@ -341,6 +352,7 @@ def train_naive(
     # anyway is what lets the gate check the two sides agree (ADR 0003 §5).
     val_table = slice_metrics(data.val, model.predict_proba(x_val), y_val)
     result.extra["val_slices"] = val_table.to_dicts()
+    result.extra["split"] = data.split.to_dict()
     result.extra["not_collapsed_reference"] = f"{model.name}/{result.version}"
     if data.test.height:
         x_test, y_test = data.as_xy("test")
@@ -365,6 +377,7 @@ def train_naive(
                 "terms": list(TERM_NAMES),
                 "coefficients": model.coefficients(),
                 "stride": stride,
+                "split": data.split.to_dict(),
                 "val_slices": result.extra.get("val_slices"),
                 "test_slices": result.extra.get("test_slices"),
                 "not_collapsed_reference": result.extra["not_collapsed_reference"],

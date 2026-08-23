@@ -274,7 +274,7 @@ def market_history(
 #: yet should produce a sentence rather than a traceback.
 TRAINERS: dict[str, tuple[str, str]] = {
     "naive": ("nfl.models.naive", "train_naive"),
-    "xgb": ("nfl.models.gbdt", "train_gbdt"),
+    "xgb": ("nfl.models.gbdt", "train_xgboost"),
     "mlp": ("nfl.models.tf_mlp", "train_mlp"),
     "seq": ("nfl.models.tf_seq", "train_seq"),
     "ensemble": ("nfl.models.train_ensemble", "train_ensemble"),
@@ -334,10 +334,17 @@ def train(
         str | None,
         typer.Option("--seasons", help="Seasons to train on, e.g. '2010-2022' or '2018,2020'."),
     ] = None,
-    train_through: Annotated[
-        int, typer.Option("--train-through", help="Last season included in training.")
-    ] = 2022,
-    val_season: Annotated[int, typer.Option("--val-season", help="Validation season.")] = 2023,
+    split: Annotated[
+        str | None,
+        typer.Option(
+            "--split",
+            help=(
+                "Season split: 'train_through/val_season/test_from', 'rolling:<season>', "
+                "or a bare season (= rolling on it). Default is the rolling window "
+                "dated from the schedules on disk: train <= L-2, val L-1, test L."
+            ),
+        ),
+    ] = None,
     members: Annotated[
         str | None,
         typer.Option(
@@ -358,20 +365,32 @@ def train(
     Each model lives in its own module and is imported only when selected, so
     the GBDT path never pays for TensorFlow's import and vice versa.
 
+    The split rolls with the data — train <= L-2, val L-1, test L, where L is
+    the newest season whose regular season has finished on disk — and whichever
+    split is used is written into the artifact's manifest, because the
+    promotion gate refuses to compare two models validated on different seasons.
+    ``--split`` pins it.
+
     ``--model ensemble`` does not train anything itself: it loads the latest
     registry artifact of each member, fits the meta-learner and the phase-aware
     calibrator on val, and writes the blended model back to the registry.
     """
     import inspect
 
+    from nfl.features.splits import resolve_split
+
     key = _resolve_model_key(model)
     trainer = _load_trainer(key)
+
+    try:
+        resolved_split = resolve_split(split)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--split") from exc
 
     season_list = _parse_seasons(seasons) if seasons else None
     candidates: dict[str, Any] = {
         "seasons": season_list,
-        "train_through": train_through,
-        "val_season": val_season,
+        "split": resolved_split,
         "members": [m.strip() for m in members.split(",") if m.strip()] if members else None,
         "meta": meta,
     }
@@ -383,8 +402,8 @@ def train(
         params = {}  # type: ignore[assignment]
     kwargs = {k: v for k, v in candidates.items() if k in params and v is not None}
 
-    scope = seasons if seasons else f"<={train_through}"
-    console.print(f"train model={key} seasons={scope} val_season={val_season}")
+    scope = seasons if seasons else "all on disk"
+    console.print(f"train model={key} seasons={scope} split={resolved_split.label}")
     _render_fit_result(trainer(**kwargs), key)
 
 
@@ -558,6 +577,82 @@ def promote(
 
 
 @app.command()
+def retrain(
+    season: Annotated[
+        int | None,
+        typer.Option("--season", help="Season to ingest; default is the one in progress."),
+    ] = None,
+    split: Annotated[
+        str | None,
+        typer.Option(
+            "--split",
+            help=(
+                "Season split for every fit: 'train_through/val_season/test_from', "
+                "'rolling:<season>', or a bare season. Default is the rolling window."
+            ),
+        ),
+    ] = None,
+    skip_ingest: Annotated[
+        bool, typer.Option("--skip-ingest", help="Do not touch the network; use what is on disk.")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the plan — season, split, step order — only.")
+    ] = False,
+    parity_samples: Annotated[
+        int | None,
+        typer.Option("--parity-samples", help="Serving-parity samples in the gate (default 20)."),
+    ] = None,
+) -> None:
+    """Ingest, rebuild, retrain, gate, promote, resolve and evaluate — in that order.
+
+    The weekly loop as one command. Every step is timed, the whole run is
+    written to ``data/reports/retrain-<timestamp>.md``, and the summary at the
+    end answers the three questions the run exists to answer: did the gate pass,
+    what is PRODUCTION pointing at now, and has the served model drifted.
+
+    A step that raises stops the chain. A gate that *refuses* does not — it is
+    the gate working, and the ledger and drift readings that follow describe the
+    model still in production, which is exactly what you want to see when a
+    candidate has just failed to replace it. The command exits non-zero either
+    way.
+    """
+    from nfl import retrain as retrain_mod
+
+    try:
+        result = retrain_mod.run_retrain(
+            season=season,
+            split=split,
+            skip_ingest=skip_ingest,
+            dry_run=dry_run,
+            echo=console.print,
+            parity_samples=parity_samples,
+        )
+    except ValueError as exc:
+        console.print(f"[red]cannot start the retrain[/red]: {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print()
+    retrain_mod.render_summary(result, console)
+    if result.report_path is not None:
+        console.print(f"\nrun log: [green]{result.report_path}[/green]")
+
+    failed = result.failed_step
+    if failed is not None:
+        console.print(
+            f"\n[red]retrain stopped at '{failed.name}'[/red]: {failed.detail}\n"
+            "Nothing downstream ran, because it would have been reading stale inputs."
+        )
+        raise typer.Exit(1)
+    if result.gate is not None and not result.gate.passed:
+        console.print(
+            f"\n[yellow]NOT promoted[/yellow]: {result.candidate}/{result.candidate_version} "
+            "did not clear the ADR 0003 §5 gate. PRODUCTION is unchanged. "
+            "`nfl promote --candidate ... --force` exists, and should stay unused."
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
 def predict(
     game: Annotated[
         str,
@@ -685,7 +780,13 @@ def evaluate(
     ] = True,
     baseline_log_loss: Annotated[
         float | None,
-        typer.Option("--baseline-log-loss", help="Training-time log loss, for the drift trigger."),
+        typer.Option(
+            "--baseline-log-loss",
+            help=(
+                "Training-time log loss for the drift trigger. Omit it and the number "
+                "is read from each model's own manifest."
+            ),
+        ),
     ] = None,
     window: Annotated[
         int, typer.Option("--window", help="Rolling window size for the drift trigger.")
@@ -697,11 +798,16 @@ def evaluate(
         bool, typer.Option("--markdown/--no-markdown", help="Also write data/reports/<name>.md.")
     ] = False,
 ) -> None:
-    """Report log-loss, Brier, calibration and edge vs market.
+    """Report log-loss, Brier, calibration, edge vs market and the drift flag.
 
     Reads the prediction ledger by default. ``--backtest`` instead loads the
     model from the registry and replays it over the assembled dataset — the two
     paths produce the same frame schema, so the numbers are comparable.
+
+    The **retrain trigger** prints for every model version: the last
+    ``--window`` resolved predictions are scored and compared against what that
+    artifact's manifest says it scored at training time, and a drift of more
+    than ``--drift-threshold`` nats flags ``RETRAIN``.
     """
     from nfl.logging import evaluate as evaluate_mod
 

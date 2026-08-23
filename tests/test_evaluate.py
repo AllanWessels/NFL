@@ -7,6 +7,7 @@ maths shows up as a wrong number rather than a changed-but-plausible one.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -364,6 +365,61 @@ def test_build_report_attaches_the_retrain_signal_by_version() -> None:
     report = ev.build_report(out, with_market=False, baselines={"v1": 0.2})
     assert report.models[0].retrain is not None
     assert report.models[0].retrain.triggered is True
+
+
+# --------------------------------------------------------------------------- #
+# The drift baseline comes from the registry, not from the operator's memory
+# --------------------------------------------------------------------------- #
+
+
+def _stock_manifest(root: Path, name: str, version: str, metrics: dict[str, float]) -> None:
+    directory = root / name / version
+    directory.mkdir(parents=True)
+    (directory / "manifest.json").write_text(
+        json.dumps({"name": name, "version": version, "metrics": metrics}), encoding="utf-8"
+    )
+
+
+def test_the_training_baseline_is_read_out_of_the_manifest(tmp_path: Path) -> None:
+    _stock_manifest(tmp_path, "m", "v1", {"log_loss": 0.31, "brier": 0.1})
+    assert ev.training_log_loss("m", "v1", root=tmp_path) == pytest.approx(0.31)
+
+
+def test_a_manifest_that_splits_train_and_val_yields_the_val_number(tmp_path: Path) -> None:
+    """A train-set baseline would flag drift on every well-fitted model."""
+    _stock_manifest(tmp_path, "m", "v1", {"train_log_loss": 0.10, "val_log_loss": 0.42})
+    assert ev.training_log_loss("m", "v1", root=tmp_path) == pytest.approx(0.42)
+
+
+@pytest.mark.parametrize(("name", "version"), [("m", "missing"), ("?", "?"), ("", "v1"), ("m", "")])
+def test_no_artifact_means_no_baseline_rather_than_an_explosion(
+    tmp_path: Path, name: str, version: str
+) -> None:
+    assert ev.training_log_loss(name, version, root=tmp_path) is None
+
+
+def test_the_drift_flag_appears_without_anyone_passing_a_baseline(tmp_path: Path) -> None:
+    """The whole point of item 4: an invisible-by-default warning is not a warning."""
+    _stock_manifest(tmp_path, "m", "v1", {"log_loss": 0.20})
+    out = frame(p_home=[0.5] * 4, resolved_home_win=[True, False, True, False])
+    report = ev.build_report(out, with_market=False, models_root=tmp_path)
+    assert report.models[0].retrain is not None
+    assert report.models[0].retrain.baseline_log_loss == pytest.approx(0.20)
+    assert report.models[0].retrain.triggered is True
+
+
+def test_a_version_with_nothing_on_record_says_so_loudly(tmp_path: Path) -> None:
+    out = frame(p_home=[0.5] * 4, resolved_home_win=[True, False, True, False])
+    report = ev.build_report(out, with_market=False, models_root=tmp_path)
+    assert report.models[0].retrain is None
+    assert any("no training-time log loss on record" in note for note in report.notes)
+
+
+def test_registry_baselines_can_be_turned_off(tmp_path: Path) -> None:
+    _stock_manifest(tmp_path, "m", "v1", {"log_loss": 0.20})
+    out = frame(p_home=[0.5] * 4, resolved_home_win=[True, False, True, False])
+    report = ev.build_report(out, with_market=False, models_root=tmp_path, registry_baselines=False)
+    assert report.models[0].retrain is None
 
 
 def test_markdown_report_round_trips_to_disk(tmp_path: Path) -> None:
