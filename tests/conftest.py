@@ -8,6 +8,13 @@ split, provenance stamping, partition writing — against known rows.
 
 from __future__ import annotations
 
+import os
+
+# Rich/typer wrap help text to the terminal width; on a non-TTY CI runner the
+# default is 80 columns and option names get truncated, breaking help-text tests.
+os.environ["COLUMNS"] = "200"
+os.environ.setdefault("NO_COLOR", "1")
+
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
