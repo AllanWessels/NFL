@@ -1,8 +1,8 @@
 """``nfl`` command-line interface.
 
-``ingest``, ``features``, ``market``, ``live``, ``train``, ``evaluate`` and
-``ledger`` are real; ``predict`` is still a stub, present so the CLI surface and
-the ``/predict`` slash command can be exercised before inference lands.
+``ingest``, ``features``, ``market``, ``live``, ``train``, ``predict``,
+``evaluate`` and ``ledger`` all run real code; ``predict`` is the end-to-end
+inference path behind the ``/predict`` slash command.
 
 Every command imports its implementation *inside the function body*. That is
 deliberate: ``nfl --help`` must stay instant, and the TensorFlow models must not
@@ -28,8 +28,6 @@ console = Console()
 
 ingest_app = typer.Typer(help="Ingest data sources")
 app.add_typer(ingest_app, name="ingest")
-
-_NOT_IMPLEMENTED = "[yellow]not implemented yet[/yellow] (scaffold stage)"
 
 
 def _version_callback(value: bool) -> None:
@@ -395,20 +393,55 @@ def predict(
     game_id: Annotated[str, typer.Argument(help="Game id, e.g. '2024_18_KC_DEN'.")],
     at: Annotated[
         str | None,
+        typer.Option("--at", help="Rewind to a game time, e.g. 'Q4 05:00'; omit for latest."),
+    ] = None,
+    source: Annotated[
+        str,
         typer.Option(
-            "--at",
-            help="Snapshot time: ISO timestamp, 'Q4 05:00', play id, or omit for live/latest.",
+            "--source",
+            help="Feed: auto (replay a finished game, else ESPN) | espn | replay.",
         ),
-    ] = None,
-    model_version: Annotated[
-        str | None, typer.Option("--model-version", help="Pin a model version; default is latest.")
-    ] = None,
+    ] = "auto",
+    model: Annotated[
+        str,
+        typer.Option("--model", help="'production', a model name, or 'name:version'."),
+    ] = "production",
+    no_ledger: Annotated[
+        bool, typer.Option("--no-ledger", help="Do not append the prediction to the ledger.")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the result as JSON instead of a panel.")
+    ] = False,
 ) -> None:
     """Predict win probability for a game at a point in time and log it to the ledger."""
-    console.print(
-        f"predict game_id={game_id} at={at or 'latest'} model_version={model_version or 'latest'}: "
-        f"{_NOT_IMPLEMENTED}"
-    )
+    import json as json_mod
+    from typing import cast
+
+    from nfl.inference.predict import PredictionError, Source, predict_game, render_prediction
+
+    if source not in ("auto", "espn", "replay"):
+        raise typer.BadParameter(
+            f"unknown source {source!r}; expected auto | espn | replay", param_hint="--source"
+        )
+    try:
+        result = predict_game(
+            game_id,
+            at=at,
+            source=cast("Source", source),
+            model=model,
+            write_ledger=not no_ledger,
+        )
+    except PredictionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        console.print(f"[red]cannot predict {game_id}[/red]: {exc}")
+        raise typer.Exit(1) from exc
+
+    if as_json:
+        console.print_json(json_mod.dumps(result.to_dict()))
+        return
+    render_prediction(result, console)
 
 
 @app.command()
