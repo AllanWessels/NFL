@@ -318,6 +318,129 @@ def evaluate(
     console.print(f"evaluate season={season or 'all'} vs_market={vs_market}: {_NOT_IMPLEMENTED}")
 
 
+features_app = typer.Typer(help="Build feature tables")
+app.add_typer(features_app, name="features")
+
+
+@features_app.command("build")
+def features_build(
+    seasons: Annotated[
+        str, typer.Option("--seasons", help="Season range, e.g. '2010-2024' or '2024'.")
+    ] = "2010-2024",
+    out: Annotated[
+        str | None,
+        typer.Option("--out", help="Root to write under; default is data/processed."),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Assemble and report without writing parquet.")
+    ] = False,
+) -> None:
+    """Assemble every available feature builder into ``data/processed/dataset``."""
+    from pathlib import Path
+
+    from nfl.data.nflverse import parse_seasons
+    from nfl.features.assemble import AssemblyReport, assemble_dataset, feature_columns
+
+    try:
+        season_list = parse_seasons(seasons)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--seasons") from exc
+
+    report = AssemblyReport()
+    console.print(f"features build seasons={season_list[0]}-{season_list[-1]}")
+    df = assemble_dataset(
+        season_list,
+        write=not dry_run,
+        root=Path(out) if out else None,
+        report=report,
+    )
+    for name, reason in report.skipped:
+        console.print(f"  [dim]skip[/dim]  {name}: {reason}")
+    for name in report.ran:
+        console.print(f"  [green]built[/green] {name}")
+    games = df.get_column("meta__game_id").n_unique()
+    console.print(
+        f"{df.height:,} rows / {games:,} games / {len(feature_columns(df)):,} features"
+        + (" [yellow](dry run, nothing written)[/yellow]" if dry_run else "")
+    )
+
+
+@features_app.command("inspect")
+def features_inspect(
+    seasons: Annotated[
+        str | None, typer.Option("--seasons", help="Restrict to seasons, e.g. '2023-2024'.")
+    ] = None,
+    top: Annotated[int, typer.Option("--top", help="How many features to list.")] = 15,
+    path: Annotated[
+        str | None, typer.Option("--path", help="Dataset root; default is data/processed.")
+    ] = None,
+) -> None:
+    """Row/null/variance summary of the assembled dataset."""
+    from pathlib import Path
+
+    import polars as pl
+    from rich.table import Table
+
+    from nfl.features.assemble import LABEL_COLUMN, feature_columns, read_dataset
+
+    try:
+        df = read_dataset(seasons, root=Path(path) if path else None)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    feats = feature_columns(df)
+    seasons_present = sorted(
+        s for s in df.get_column("meta__season").unique().to_list() if s is not None
+    )
+    labelled = df.get_column(LABEL_COLUMN).drop_nulls()
+    console.print(
+        f"{df.height:,} rows / {df.get_column('meta__game_id').n_unique():,} games / "
+        f"{len(feats):,} features / seasons {seasons_present[0]}-{seasons_present[-1]}"
+    )
+    if labelled.len():
+        win_rate = labelled.cast(pl.Float64).sum() / labelled.len()
+        console.print(
+            f"label {LABEL_COLUMN}: {labelled.len():,} labelled rows, home win rate {win_rate:.4f}"
+        )
+    else:
+        console.print(f"label {LABEL_COLUMN}: [yellow]no labelled rows[/yellow]")
+    if not feats:
+        console.print("[yellow]no feature columns — are the builders installed?[/yellow]")
+        return
+
+    nulls = df.select([pl.col(c).null_count().alias(c) for c in feats]).row(0)
+    variances = df.select(
+        [pl.col(c).cast(pl.Float64, strict=False).var().alias(c) for c in feats]
+    ).row(0)
+    stats = [
+        (c, (n or 0) / max(df.height, 1), v if v is not None else float("nan"))
+        for c, n, v in zip(feats, nulls, variances, strict=True)
+    ]
+
+    variance_table = Table(title=f"top {top} features by variance")
+    variance_table.add_column("feature")
+    variance_table.add_column("variance", justify="right")
+    variance_table.add_column("null rate", justify="right")
+    for name, null_rate, var in sorted(
+        stats, key=lambda s: s[2] if s[2] == s[2] else -1.0, reverse=True
+    )[:top]:
+        variance_table.add_row(name, f"{var:,.3f}", f"{null_rate:.1%}")
+    console.print(variance_table)
+
+    null_table = Table(title=f"top {top} features by null rate")
+    null_table.add_column("feature")
+    null_table.add_column("null rate", justify="right")
+    for name, null_rate, _ in sorted(stats, key=lambda s: s[1], reverse=True)[:top]:
+        if null_rate == 0:
+            break
+        null_table.add_row(name, f"{null_rate:.1%}")
+    if null_table.row_count:
+        console.print(null_table)
+    else:
+        console.print("[green]no nulls in any feature column[/green]")
+
+
 live_app = typer.Typer(help="Live and replayed in-game feeds.", no_args_is_help=True)
 app.add_typer(live_app, name="live")
 
