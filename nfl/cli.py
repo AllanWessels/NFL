@@ -1,13 +1,17 @@
 """``nfl`` command-line interface.
 
-``ingest`` is a real sub-app (``nfl ingest <source>``); ``train``, ``predict``
-and ``evaluate`` are still stubs, present so the CLI surface, the ``/predict``
-slash command and CI wiring can be exercised before those pipelines land.
+``ingest``, ``features``, ``market``, ``live``, ``train``, ``evaluate`` and
+``ledger`` are real; ``predict`` is still a stub, present so the CLI surface and
+the ``/predict`` slash command can be exercised before inference lands.
+
+Every command imports its implementation *inside the function body*. That is
+deliberate: ``nfl --help`` must stay instant, and the TensorFlow models must not
+be imported by someone running ``nfl ingest``.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -267,21 +271,123 @@ def market_history(
     console.print(f"[dim]{len(rows)} bars ({interval}m) for {rows[0].kalshi_ticker}[/dim]")
 
 
+#: ``--model`` key -> ``(module, function)``. Imported lazily at dispatch time:
+#: ``nfl --help`` must not import TensorFlow, and a model that has not landed
+#: yet should produce a sentence rather than a traceback.
+TRAINERS: dict[str, tuple[str, str]] = {
+    "naive": ("nfl.models.naive", "train_naive"),
+    "xgb": ("nfl.models.gbdt", "train_gbdt"),
+    "mlp": ("nfl.models.tf_mlp", "train_mlp"),
+    "seq": ("nfl.models.tf_seq", "train_seq"),
+    "ensemble": ("nfl.models.ensemble", "train_ensemble"),
+}
+
+#: Older spellings kept working so existing scripts and docs do not break.
+MODEL_ALIASES: dict[str, str] = {
+    "baseline": "naive",
+    "gbdt": "xgb",
+    "tf_mlp": "mlp",
+    "tf_seq": "seq",
+}
+
+
+def _resolve_model_key(model: str) -> str:
+    key = MODEL_ALIASES.get(model, model)
+    if key not in TRAINERS:
+        raise typer.BadParameter(
+            f"unknown model {model!r}; expected one of {sorted(TRAINERS)} "
+            f"(aliases: {sorted(MODEL_ALIASES)})",
+            param_hint="--model",
+        )
+    return key
+
+
+def _load_trainer(key: str) -> Any:
+    """Import the sibling trainer, or exit saying what is missing and where."""
+    import importlib
+
+    module_name, func_name = TRAINERS[key]
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        path = module_name.replace(".", "/")
+        console.print(
+            f"[red]model '{key}' is not available[/red]: cannot import {module_name} ({exc}).\n"
+            f"  It lives in {path}.py, which is not in this checkout yet."
+        )
+        raise typer.Exit(1) from exc
+    func = getattr(module, func_name, None)
+    if func is None:
+        console.print(
+            f"[red]{module_name} has no {func_name}()[/red]; the trainer entrypoint for "
+            f"'{key}' is expected to be `def {func_name}(seasons=..., ...)`."
+        )
+        raise typer.Exit(1)
+    return func
+
+
 @app.command()
 def train(
     model: Annotated[
-        str, typer.Option("--model", help="Model key: baseline | gbdt | mlp | seq | ensemble.")
-    ] = "baseline",
+        str,
+        typer.Option("--model", help="Model key: naive | xgb | mlp | seq | ensemble."),
+    ] = "naive",
+    seasons: Annotated[
+        str | None,
+        typer.Option("--seasons", help="Seasons to train on, e.g. '2010-2022' or '2018,2020'."),
+    ] = None,
     train_through: Annotated[
         int, typer.Option("--train-through", help="Last season included in training.")
     ] = 2022,
     val_season: Annotated[int, typer.Option("--val-season", help="Validation season.")] = 2023,
 ) -> None:
-    """Train a model on season-based splits and write it to ``models/``."""
-    console.print(
-        f"train model={model} train_through={train_through} val_season={val_season}: "
-        f"{_NOT_IMPLEMENTED}"
-    )
+    """Train a model on season-based splits and write it to ``data/models/``.
+
+    Each model lives in its own module and is imported only when selected, so
+    the GBDT path never pays for TensorFlow's import and vice versa.
+    """
+    import inspect
+
+    key = _resolve_model_key(model)
+    trainer = _load_trainer(key)
+
+    season_list = _parse_seasons(seasons) if seasons else None
+    candidates: dict[str, Any] = {
+        "seasons": season_list,
+        "train_through": train_through,
+        "val_season": val_season,
+    }
+    # Sibling trainers are plain functions with varying signatures; pass only
+    # what each one actually accepts rather than assuming a common shape.
+    try:
+        params = inspect.signature(trainer).parameters
+    except (TypeError, ValueError):  # pragma: no cover - C callables
+        params = {}  # type: ignore[assignment]
+    kwargs = {k: v for k, v in candidates.items() if k in params and v is not None}
+
+    scope = seasons if seasons else f"<={train_through}"
+    console.print(f"train model={key} seasons={scope} val_season={val_season}")
+    _render_fit_result(trainer(**kwargs), key)
+
+
+def _render_fit_result(result: object, key: str) -> None:
+    """Print whatever the trainer returned; a ``FitResult`` gets a metrics table."""
+    from rich.table import Table
+
+    name = getattr(result, "model_name", key)
+    version = getattr(result, "version", None)
+    if version is None:
+        console.print(f"[green]trained[/green] {name}: {result}")
+        return
+    console.print(f"[green]trained[/green] {name} version={version}")
+    metrics = getattr(result, "metrics", None)
+    if isinstance(metrics, dict) and metrics:
+        table = Table(title="metrics")
+        table.add_column("metric")
+        table.add_column("value", justify="right")
+        for metric, value in metrics.items():
+            table.add_row(str(metric), f"{value:.6f}" if isinstance(value, float) else str(value))
+        console.print(table)
 
 
 @app.command()
@@ -307,15 +413,216 @@ def predict(
 
 @app.command()
 def evaluate(
+    model: Annotated[
+        str | None, typer.Option("--model", help="Restrict to one model name.")
+    ] = None,
+    version: Annotated[
+        str | None, typer.Option("--version", help="Restrict to one model version.")
+    ] = None,
     season: Annotated[
         int | None, typer.Option("--season", help="Restrict to a single season.")
     ] = None,
+    ledger: Annotated[
+        bool,
+        typer.Option(
+            "--ledger/--backtest",
+            help="Score logged predictions (default) or run an offline backtest.",
+        ),
+    ] = True,
     vs_market: Annotated[
         bool, typer.Option("--vs-market/--no-vs-market", help="Also report edge vs closing line.")
     ] = True,
+    threshold: Annotated[
+        float, typer.Option("--threshold", help="Minimum |p - market| before the paper bet.")
+    ] = 0.05,
+    fee_coefficient: Annotated[
+        float, typer.Option("--fee-coefficient", help="Kalshi fee coefficient (see evaluate.py).")
+    ] = 0.07,
+    two_sided_fees: Annotated[
+        bool,
+        typer.Option(
+            "--two-sided-fees/--one-sided-fees",
+            help="Charge the trading fee on entry and exit, or only on entry.",
+        ),
+    ] = True,
+    baseline_log_loss: Annotated[
+        float | None,
+        typer.Option("--baseline-log-loss", help="Training-time log loss, for the drift trigger."),
+    ] = None,
+    window: Annotated[
+        int, typer.Option("--window", help="Rolling window size for the drift trigger.")
+    ] = 500,
+    drift_threshold: Annotated[
+        float, typer.Option("--drift-threshold", help="Absolute log-loss drift that flags retrain.")
+    ] = 0.02,
+    markdown: Annotated[
+        bool, typer.Option("--markdown/--no-markdown", help="Also write data/reports/<name>.md.")
+    ] = False,
 ) -> None:
-    """Report log-loss, Brier score, calibration and edge vs market from the ledger."""
-    console.print(f"evaluate season={season or 'all'} vs_market={vs_market}: {_NOT_IMPLEMENTED}")
+    """Report log-loss, Brier, calibration and edge vs market.
+
+    Reads the prediction ledger by default. ``--backtest`` instead loads the
+    model from the registry and replays it over the assembled dataset — the two
+    paths produce the same frame schema, so the numbers are comparable.
+    """
+    from nfl.logging import evaluate as evaluate_mod
+
+    seasons = [season] if season is not None else None
+    kwargs: dict[str, Any] = {
+        "threshold": threshold,
+        "fee_coefficient": fee_coefficient,
+        "two_sided_fees": two_sided_fees,
+        "with_market": vs_market,
+        "window": window,
+        "drift_threshold": drift_threshold,
+        "baselines": ({model or version or "": baseline_log_loss} if baseline_log_loss else None),
+    }
+
+    if ledger:
+        report = evaluate_mod.evaluate_ledger(
+            seasons=seasons, model_name=model, model_version=version, **kwargs
+        )
+    else:
+        frame = _backtest_frame(model, version, seasons)
+        report = evaluate_mod.build_report(frame, source="backtest", **kwargs)
+
+    evaluate_mod.render_report(report, console)
+    if markdown:
+        path = evaluate_mod.write_markdown(report)
+        console.print(f"\nwrote [green]{path}[/green]")
+
+
+def _backtest_frame(model: str | None, version: str | None, seasons: list[int] | None) -> Any:
+    """Load a trained model from the registry and replay it over the dataset."""
+    if not model:
+        raise typer.BadParameter("--backtest needs --model NAME", param_hint="--model")
+    import importlib
+
+    try:
+        # ``importlib`` rather than a plain import: the module is written by
+        # another agent and may not exist here, and a static import would make
+        # that a type-check error instead of a runtime message.
+        registry = importlib.import_module("nfl.models.registry")
+    except ImportError as exc:
+        console.print(
+            f"[red]--backtest needs nfl/models/registry.py[/red] ({exc}); "
+            "it is not in this checkout yet. Use --ledger."
+        )
+        raise typer.Exit(1) from exc
+
+    from nfl.features.assemble import read_dataset
+    from nfl.logging.backtest import backtest
+
+    try:
+        resolved_version = version or registry.latest(model)
+        loaded = registry.load(model, resolved_version)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        console.print(
+            f"[red]no trained artifact for model '{model}' in the registry[/red] ({exc}); "
+            "run `nfl train` first."
+        )
+        raise typer.Exit(1) from exc
+    frame = read_dataset(seasons)
+    return backtest(loaded, frame, model_name=model, model_version=resolved_version)
+
+
+ledger_app = typer.Typer(help="The prediction ledger (append-only parquet + DuckDB view).")
+app.add_typer(ledger_app, name="ledger")
+
+
+def _schedules_with_scores() -> Any:
+    """The nflverse schedule frame, final scores included, for ledger resolution."""
+    import polars as pl
+
+    from nfl.data.market import closing_lines
+    from nfl.features.assemble import load_raw_table
+
+    try:
+        return load_raw_table("schedules")
+    except FileNotFoundError:
+        pass
+    path = closing_lines.find_schedule_file()
+    if path is None:
+        console.print(
+            "[red]no nflverse schedule on disk[/red]; run "
+            "`nfl ingest nflverse --tables schedules` first"
+        )
+        raise typer.Exit(1)
+    return pl.read_csv(path) if path.suffix == ".csv" else pl.read_parquet(path)
+
+
+@ledger_app.command("resolve")
+def ledger_resolve() -> None:
+    """Fill outcome columns for games that have finished. Idempotent."""
+    from nfl.logging import ledger as ledger_mod
+
+    schedules = _schedules_with_scores()
+    try:
+        report = ledger_mod.resolve_ledger(schedules)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(
+        f"ledger resolve: {report.rows:,} row(s) scanned, "
+        f"[green]{report.newly_resolved:,}[/green] newly resolved, "
+        f"{report.still_open:,} still open ({len(report.files)} file(s) rewritten)"
+    )
+
+
+@ledger_app.command("show")
+def ledger_show(
+    last: Annotated[int, typer.Option("--last", "-n", help="How many rows to show.")] = 20,
+    model: Annotated[str | None, typer.Option("--model", help="Filter by model name.")] = None,
+    game_id: Annotated[str | None, typer.Option("--game-id", help="Filter by game.")] = None,
+) -> None:
+    """Print the most recent ledger rows."""
+    from rich.table import Table
+
+    from nfl.logging import ledger as ledger_mod
+
+    frame = ledger_mod.read_ledger(model_name=model, game_ids=[game_id] if game_id else None)
+    if frame.is_empty():
+        console.print("[yellow]ledger is empty[/yellow]")
+        return
+
+    table = Table(title=f"prediction ledger (last {min(last, frame.height)} of {frame.height:,})")
+    for header in ("predicted_at", "game_id", "clock", "model", "version", "p_home", "conf", "won"):
+        table.add_column(header, justify="right" if header in {"p_home", "conf"} else "left")
+    for row in frame.tail(last).iter_rows(named=True):
+        stamp = row["predicted_at_utc"]
+        won = row["resolved_home_win"]
+        table.add_row(
+            f"{stamp:%Y-%m-%d %H:%M}" if stamp else "—",
+            str(row["game_id"]),
+            "—"
+            if row["snapshot_game_seconds_remaining"] is None
+            else f"{row['snapshot_game_seconds_remaining']}s",
+            str(row["model_name"] or "—"),
+            str(row["model_version"] or "—"),
+            f"{row['p_home']:.4f}",
+            "—" if row["confidence"] is None else f"{row['confidence']:.3f}",
+            "—" if won is None else ("home" if won else "away"),
+        )
+    console.print(table)
+    resolved = int(frame.get_column("resolved_home_win").is_not_null().sum())
+    console.print(f"[dim]{resolved:,} of {frame.height:,} resolved[/dim]")
+
+
+@ledger_app.command("register")
+def ledger_register() -> None:
+    """(Re)create the ``prediction_ledger`` DuckDB view over the parquet lake."""
+    from nfl.data.store import open_db
+    from nfl.logging import ledger as ledger_mod
+
+    con = open_db()
+    try:
+        views = ledger_mod.register_ledger_views(con)
+    finally:
+        con.close()
+    if views:
+        console.print(f"registered view [green]{views[0]}[/green]")
+    else:
+        console.print("[yellow]ledger is empty; no view registered[/yellow]")
 
 
 features_app = typer.Typer(help="Build feature tables")
