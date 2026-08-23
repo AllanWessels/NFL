@@ -788,7 +788,11 @@ def _to_frame(rows: Iterable[dict[str, Any]]) -> pl.DataFrame:
 # --------------------------------------------------------------------------- #
 
 WEATHER_DIR = RAW_DIR / "weather"
-DEFAULT_GAMES_PARQUET = RAW_DIR / "nflverse" / "schedules" / "*.parquet"
+#: Where the games come from by default. The glob is **recursive** because the
+#: nflverse ingest partitions by season — ``schedules/season=2024/part-0.parquet``
+#: — so a single-star glob matches nothing at all and every default-path run
+#: reports "no seasons matched" while the schedules sit right there on disk.
+DEFAULT_GAMES_PARQUET = RAW_DIR / "nflverse" / "schedules" / "**" / "*.parquet"
 
 
 #: Sentinel for ``ingest_weather(cache_dir=...)`` so that an explicit ``None`` means

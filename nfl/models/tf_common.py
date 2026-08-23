@@ -42,7 +42,7 @@ import polars as pl
 from nfl.config import MODELS_DIR
 from nfl.data.market_blocklist import assert_no_market_columns
 from nfl.features.assemble import LABEL_COLUMN, LABEL_PREFIX, META_PREFIX, read_dataset
-from nfl.features.splits import DEFAULT_SPLIT, SeasonSplit, Splits, split_frames
+from nfl.features.splits import SeasonSplit, Splits, split_frames
 
 __all__ = [
     "NON_GENERALISING_SUFFIXES",
@@ -119,7 +119,7 @@ def labels_of(df: pl.DataFrame) -> np.ndarray:
 def read_modelling_frames(
     seasons: Sequence[int] | None = None,
     *,
-    split: SeasonSplit = DEFAULT_SPLIT,
+    split: SeasonSplit | None = None,
     root: Path | None = None,
 ) -> Splits:
     """``(train, val, test)`` assembled rows with a known outcome.

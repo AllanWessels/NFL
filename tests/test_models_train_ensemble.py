@@ -23,6 +23,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from nfl.features.splits import SeasonSplit
 from nfl.models import registry
 from nfl.models.base import FitResult
 from nfl.models.data import ModelFrames
@@ -321,8 +322,7 @@ def _train(frames, stocked, tmp_path, **kwargs):
         frames=frames,
         models_root=stocked,
         reports_root=tmp_path / "data",
-        train_through=2021,
-        val_season=2022,
+        split=SeasonSplit(train_through=2021, val_season=2022, test_from=2023),
         name=kwargs.pop("name", "ensemble_test"),
         phase_min_samples=20,
         **kwargs,
@@ -540,6 +540,62 @@ def _floor_and_candidate(root, *, candidate_slices, floor_slices=None, flat_mani
         "20240102T000000",
         val_slices=candidate_slices,
     )
+
+
+def _floor_and_candidate_with_splits(root, *, floor_split, candidate_split):
+    """A clearly-winning candidate, so only the split condition can fail it."""
+    _save(
+        ConstantModel(p=0.5, name="naive_score_time"),
+        root,
+        "naive_score_time",
+        "20240101T000000",
+        val_slices=_slices(0.30, 0.10),
+        split=floor_split.to_dict(),
+    )
+    _save(
+        ConstantModel(p=0.5, name="cand"),
+        root,
+        "cand",
+        "20240102T000000",
+        val_slices=_slices(0.25, 0.08, not_collapsed=0.55),
+        split=candidate_split.to_dict(),
+        not_collapsed_reference="naive_score_time/20240101T000000",
+    )
+
+
+def test_the_gate_passes_the_split_check_when_both_sides_agree(tmp_path):
+    root = tmp_path / "models"
+    split = SeasonSplit.rolling(2025)
+    _floor_and_candidate_with_splits(root, floor_split=split, candidate_split=split)
+    result = promotion_gate("cand", root=root, parity_samples=0)
+    assert result.passed
+    check = next(c for c in result.checks if c.slice == "split")
+    assert check.passed and check.rule_label == "same split"
+
+
+def test_the_gate_refuses_a_candidate_validated_on_a_different_season(tmp_path):
+    """Two models measured on different football cannot be subtracted."""
+    root = tmp_path / "models"
+    _floor_and_candidate_with_splits(
+        root,
+        floor_split=SeasonSplit.rolling(2024),
+        candidate_split=SeasonSplit.rolling(2025),
+    )
+    result = promotion_gate("cand", root=root, parity_samples=0)
+    assert not result.passed
+    failed = {c.slice for c in result.checks if not c.passed}
+    assert failed == {"split"}
+    assert any("different rows" in note for note in result.notes)
+
+
+def test_an_unrecorded_split_is_noted_rather_than_failed(tmp_path):
+    """Unprovable is not the same as mismatched — old artifacts stay gateable."""
+    root = tmp_path / "models"
+    _floor_and_candidate(root, candidate_slices=_slices(0.25, 0.08, not_collapsed=0.55))
+    result = promotion_gate("cand", root=root, parity_samples=0)
+    assert result.passed
+    assert not any(c.slice == "split" for c in result.checks)
+    assert any("no season split recorded" in note for note in result.notes)
 
 
 def test_gate_passes_when_the_candidate_beats_the_floor_everywhere(tmp_path):

@@ -36,7 +36,16 @@ recorded on the row. Three numbers come out of it:
 
 **Retrain triggers.** :func:`retrain_trigger` compares a rolling window of
 recent log loss against the metric the model reported at training time. Drift
-beyond a threshold raises a flag; it does not retrain anything.
+beyond a threshold raises a flag; it does not retrain anything. The baseline is
+read from the artifact's own manifest (:func:`training_log_loss`) unless the
+caller supplies one, so the flag appears without anyone having to remember a
+number — an invisible-by-default warning is not a warning.
+
+The thresholds: a **500**-prediction rolling window of resolved predictions,
+scored against the training-time log loss, flagged at **+0.02** absolute. Log
+loss is already on a log scale, so 0.02 nats means the same regression whether
+the baseline is 0.15 or 0.45 — which is why it is an absolute gap and not a
+ratio.
 """
 
 from __future__ import annotations
@@ -78,6 +87,7 @@ __all__ = [
     "render_report",
     "report_path",
     "retrain_trigger",
+    "training_log_loss",
     "write_markdown",
 ]
 
@@ -696,6 +706,40 @@ class RetrainSignal:
     reason: str
 
 
+def training_log_loss(
+    model_name: str, model_version: str, *, root: Path | None = None
+) -> float | None:
+    """The log loss ``model_name/model_version`` recorded when it was fitted.
+
+    Read out of the artifact's manifest, which is where the number already
+    lives; ``None`` when there is no such artifact (a hand-written ledger row,
+    a model since deleted) or its manifest carries no usable log loss.
+
+    Trainers spell the same number two ways — ``val_log_loss`` where the
+    manifest also carries the train-side metrics, plain ``log_loss`` where the
+    only metrics recorded are already the validation ones. Both mean *held-out*
+    log loss, which is the only honest thing to compare live predictions
+    against; a train-set baseline would flag drift on every model that fits its
+    training seasons well.
+    """
+    if not model_name or model_name == "?" or not model_version or model_version == "?":
+        return None
+    try:
+        from nfl.models import registry
+
+        manifest = registry.read_manifest(registry.model_dir(model_name, model_version, root))
+    except (ImportError, OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+    for key in ("val_log_loss", "log_loss"):
+        try:
+            loss = float(manifest.metrics[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(loss):
+            return loss
+    return None
+
+
 def retrain_trigger(
     frame: pl.DataFrame,
     *,
@@ -799,12 +843,19 @@ def build_report(
     with_market: bool = True,
     market: pl.DataFrame | None = None,
     root: Path | None = None,
+    models_root: Path | None = None,
+    registry_baselines: bool = True,
 ) -> EvaluationReport:
     """Score every model version present in ``frame`` and assemble the report.
 
     ``baselines`` maps ``model_version`` (or ``model_name``) to the log loss the
-    model reported at training time; a version with no baseline simply gets no
-    retrain signal rather than a fabricated one.
+    model reported at training time. Anything it does not cover is looked up in
+    the registry — the manifest of a served model already records what it scored
+    when it was fitted, and requiring the operator to retype that number is the
+    reason the drift flag used to be invisible unless somebody passed
+    ``--baseline-log-loss``. Pass ``registry_baselines=False`` to compare only
+    against what the caller supplied; a version with no baseline either way
+    simply gets no retrain signal rather than a fabricated one.
     """
     report = EvaluationReport(generated_at=datetime.now(UTC), source=source, n_rows=frame.height)
     if frame.is_empty():
@@ -856,6 +907,13 @@ def build_report(
         baseline = None
         if baselines:
             baseline = baselines.get(version, baselines.get(name))
+        if baseline is None and registry_baselines:
+            baseline = training_log_loss(name, version, root=models_root)
+        if baseline is None:
+            report.notes.append(
+                f"{name}/{version}: no training-time log loss on record, so no drift "
+                "flag — pass --baseline-log-loss, or retrain so the manifest carries it"
+            )
         if baseline is not None:
             model.retrain = retrain_trigger(
                 part,
@@ -947,6 +1005,11 @@ def render_report(report: EvaluationReport, console: Any) -> None:
                 f"  retrain trigger: [{colour}]{flag}[/{colour}] — {model.retrain.reason} "
                 f"(baseline {_fmt(model.retrain.baseline_log_loss)}, "
                 f"recent {_fmt(model.retrain.recent_log_loss)}, n={model.retrain.n:,})"
+            )
+        else:
+            console.print(
+                "  retrain trigger: [yellow]no baseline[/yellow] — nothing on record for "
+                "this version to compare recent log loss against"
             )
 
 
@@ -1155,10 +1218,11 @@ def evaluate_ledger(
     seasons: Sequence[int] | int | None = None,
     model_name: str | None = None,
     model_version: str | None = None,
+    models_root: Path | None = None,
     **kwargs: Any,
 ) -> EvaluationReport:
     """Read the ledger and score it — the ``nfl evaluate --ledger`` path."""
     frame = ledger_mod.read_ledger(
         root, seasons=seasons, model_name=model_name, model_version=model_version
     )
-    return build_report(frame, source="ledger", root=root, **kwargs)
+    return build_report(frame, source="ledger", root=root, models_root=models_root, **kwargs)

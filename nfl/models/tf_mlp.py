@@ -46,7 +46,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from nfl.features.splits import DEFAULT_SPLIT, SeasonSplit
+from nfl.features.splits import SeasonSplit, resolve_split
 from nfl.models.base import FitResult
 from nfl.models.feature_sets import feature_set_columns
 from nfl.models.game_aware import (
@@ -400,7 +400,7 @@ class MLPWinProb:
 def train_tf_mlp(
     seasons: Sequence[int] | None = None,
     *,
-    split: SeasonSplit = DEFAULT_SPLIT,
+    split: SeasonSplit | None = None,
     root: Path | None = None,
     models_root: Path | None = None,
     save: bool = True,
@@ -415,6 +415,7 @@ def train_tf_mlp(
     column selection (:mod:`nfl.models.feature_sets`) and ``weight_by_game``
     switches on the 1/plays-per-game row weights of ADR 0003.
     """
+    split = resolve_split(split)
     train, val, _ = read_modelling_frames(seasons, split=split, root=root)
     if train.is_empty():
         raise ValueError("no training rows; run `nfl features build` first")
@@ -430,6 +431,7 @@ def train_tf_mlp(
     )
     result.extra["feature_set"] = feature_set
     result.extra["weight_by_game"] = weight_by_game
+    result.extra["split"] = split.to_dict()
     train_seasons = sorted(train.get_column("meta__season").unique().to_list())
     if save:
         directory = model_dir(model.name, result.version, root=models_root)
