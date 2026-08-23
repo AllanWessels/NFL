@@ -52,3 +52,4 @@ htmlcov/
 # Notebooks
 .ipynb_checkpoints/
 .claude/worktrees/
+/notes
