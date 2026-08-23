@@ -1,0 +1,120 @@
+{
+ "season": {
+  "type": 2,
+  "year": 2024
+ },
+ "week": {
+  "number": 1
+ },
+ "events": [
+  {
+   "id": "401671789",
+   "uid": "s:20~l:28~e:401671789",
+   "date": "2024-09-06T00:40Z",
+   "name": "Baltimore Ravens at Kansas City Chiefs",
+   "shortName": "BAL @ KC",
+   "season": {
+    "year": 2024,
+    "type": 2,
+    "slug": "regular-season"
+   },
+   "week": {
+    "number": 1
+   },
+   "status": {
+    "clock": 0.0,
+    "displayClock": "0:00",
+    "period": 4,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    }
+   },
+   "competitions": [
+    {
+     "id": "401671789",
+     "date": "2024-09-06T00:40Z",
+     "neutralSite": false,
+     "playByPlayAvailable": true,
+     "venue": {
+      "id": "3622",
+      "fullName": "Arrowhead Stadium",
+      "address": {
+       "city": "Kansas City",
+       "state": "MO",
+       "country": "USA"
+      },
+      "indoor": false
+     },
+     "competitors": [
+      {
+       "id": "12",
+       "homeAway": "home",
+       "score": "27",
+       "team": {
+        "id": "12",
+        "abbreviation": "KC",
+        "displayName": "Kansas City Chiefs",
+        "location": "Kansas City",
+        "name": "Chiefs"
+       },
+       "records": [
+        {
+         "name": "overall",
+         "abbreviation": "Game",
+         "type": "total",
+         "summary": "1-0"
+        },
+        {
+         "name": "Home",
+         "type": "home",
+         "summary": "1-0"
+        },
+        {
+         "name": "Road",
+         "type": "road",
+         "summary": "0-0"
+        }
+       ]
+      },
+      {
+       "id": "33",
+       "homeAway": "away",
+       "score": "20",
+       "team": {
+        "id": "33",
+        "abbreviation": "BAL",
+        "displayName": "Baltimore Ravens",
+        "location": "Baltimore",
+        "name": "Ravens"
+       },
+       "records": [
+        {
+         "name": "overall",
+         "abbreviation": "Game",
+         "type": "total",
+         "summary": "0-1"
+        },
+        {
+         "name": "Home",
+         "type": "home",
+         "summary": "0-0"
+        },
+        {
+         "name": "Road",
+         "type": "road",
+         "summary": "0-1"
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

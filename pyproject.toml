@@ -38,6 +38,8 @@ dev = [
     "ruff>=0.6",
     "pre-commit>=3.8",
     "mypy>=1.11",
+    # Mocks httpx at the transport layer so live-feed tests never touch ESPN.
+    "respx>=0.21",
 ]
 
 [build-system]

@@ -318,5 +318,49 @@ def evaluate(
     console.print(f"evaluate season={season or 'all'} vs_market={vs_market}: {_NOT_IMPLEMENTED}")
 
 
+live_app = typer.Typer(help="Live and replayed in-game feeds.", no_args_is_help=True)
+app.add_typer(live_app, name="live")
+
+
+@live_app.command("snapshot")
+def live_snapshot(
+    game_id: Annotated[
+        str, typer.Argument(help="nflverse game id ('2024_01_BAL_KC') or ESPN event id.")
+    ],
+    at: Annotated[
+        str | None,
+        typer.Option("--at", help="Rewind to a game time, e.g. 'Q4 05:00' or 'OT 10:00'."),
+    ] = None,
+    source: Annotated[
+        str, typer.Option("--source", help="Feed: espn (live wire) | replay (nflverse pbp).")
+    ] = "espn",
+    schedules: Annotated[
+        str | None,
+        typer.Option("--schedules", help="Override the schedules parquet path or directory."),
+    ] = None,
+    pbp: Annotated[
+        str | None, typer.Option("--pbp", help="Override the play-by-play parquet path (replay).")
+    ] = None,
+) -> None:
+    """Print the current (or rewound) state of a game from a live feed."""
+    from nfl.data.live.render import render_snapshot
+
+    if source == "espn":
+        from nfl.data.live.espn import EspnLiveFeed
+
+        with EspnLiveFeed(schedules=schedules) as feed:
+            snapshot = feed.snapshot(game_id, at=at)
+    elif source == "replay":
+        from nfl.data.live.replay import HistoricalReplayFeed
+
+        feed_ = HistoricalReplayFeed(pbp=pbp, schedules=schedules)
+        snapshot = feed_.snapshot(game_id, at=at)
+    else:
+        console.print(f"[red]unknown --source {source!r}[/red] (expected 'espn' or 'replay')")
+        raise typer.Exit(code=2)
+
+    render_snapshot(snapshot, console)
+
+
 if __name__ == "__main__":
     app()

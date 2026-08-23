@@ -134,3 +134,61 @@ def espn_injuries() -> dict[str, Any]:
 @pytest.fixture
 def espn_news() -> dict[str, Any]:
     return load_fixture("espn_news.json")
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+ESPN_FIXTURES = FIXTURES / "espn"
+NFLVERSE_FIXTURES = FIXTURES / "nflverse"
+
+#: The game every live test uses: BAL @ KC, 2024 week 1.
+GAME_ID = "2024_01_BAL_KC"
+EVENT_ID = "401671789"
+
+
+def load_espn(name: str) -> dict[str, Any]:
+    return json.loads((ESPN_FIXTURES / name).read_text())
+
+
+@pytest.fixture(scope="session")
+def espn_summary() -> dict[str, Any]:
+    return load_espn("summary_401671789.json")
+
+
+@pytest.fixture(scope="session")
+def espn_situation() -> dict[str, Any]:
+    return load_espn("situation_401671789.json")
+
+
+@pytest.fixture(scope="session")
+def espn_scoreboard() -> dict[str, Any]:
+    return load_espn("scoreboard_20240905.json")
+
+
+@pytest.fixture(scope="session")
+def espn_scoreboard_live() -> dict[str, Any]:
+    return load_espn("scoreboard_live.json")
+
+
+@pytest.fixture(scope="session")
+def espn_injuries_payload() -> dict[str, Any]:
+    return load_espn("injuries.json")
+
+
+@pytest.fixture(scope="session")
+def schedules_path() -> Path:
+    return NFLVERSE_FIXTURES / "schedules_2024.parquet"
+
+
+@pytest.fixture(scope="session")
+def pbp_path() -> Path:
+    return NFLVERSE_FIXTURES / "pbp_2024_01_BAL_KC.parquet"
+
+
+@pytest.fixture(scope="session")
+def schedules(schedules_path: Path) -> pl.DataFrame:
+    return pl.read_parquet(schedules_path)
+
+
+@pytest.fixture(scope="session")
+def pbp(pbp_path: Path) -> pl.DataFrame:
+    return pl.read_parquet(pbp_path)
