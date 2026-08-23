@@ -206,8 +206,23 @@ def _instantiate(directory: Path, manifest: registry.Manifest, name: str) -> Any
     klass = _member_class(manifest, name)
     try:
         return klass.load(directory)
-    except (OSError, KeyError, ValueError, TypeError):
-        return klass.load(registry.resolve_artifact(directory, manifest.artifact or "model"))
+    except (OSError, KeyError, ValueError, TypeError) as first:
+        try:
+            return klass.load(registry.resolve_artifact(directory, manifest.artifact or "model"))
+        except (OSError, KeyError, ValueError, TypeError) as second:
+            # Both attempts failed, and the *first* one is almost always the
+            # informative half — the fallback is trying a path the model never
+            # meant to be handed. A `TypeError` here usually means the artifact
+            # was written by a newer version of the model class than the one in
+            # this checkout, so say that rather than leaking a path error.
+            raise RuntimeError(
+                f"cannot load {name}/{manifest.version} with "
+                f"{klass.__module__}:{klass.__qualname__} — "
+                f"loading the artifact directory raised {first!r}, and the recorded "
+                f"artifact {manifest.artifact!r} raised {second!r}. If the first is a "
+                "TypeError about an unexpected argument, the artifact was written by a "
+                "newer version of this model class: update the checkout, or retrain."
+            ) from first
 
 
 def _manifest_columns(manifest: registry.Manifest) -> list[str]:
